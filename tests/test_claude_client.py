@@ -1,0 +1,201 @@
+"""Claude adapter: request shaping, response normalization, error translation.
+
+The Anthropic SDK is replaced by a stub, so these tests assert the contract we
+depend on without ever making a network call.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any
+
+import anthropic
+import pytest
+
+from ulugbek_ai.config.settings import Settings
+from ulugbek_ai.core.errors import ConfigurationError, LLMError, LLMTimeoutError
+from ulugbek_ai.llm.base import LLMMessage, LLMToolSpec
+from ulugbek_ai.llm.claude import ClaudeClient
+
+
+class _Messages:
+    def __init__(self, response: Any = None, error: Exception | None = None) -> None:
+        self._response = response
+        self._error = error
+        self.last_request: dict[str, Any] | None = None
+
+    async def create(self, **kwargs: Any) -> Any:
+        self.last_request = kwargs
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+
+class _StubSDK:
+    def __init__(self, response: Any = None, error: Exception | None = None) -> None:
+        self.messages = _Messages(response, error)
+
+    async def close(self) -> None:
+        return None
+
+
+def _block(**kwargs: Any) -> SimpleNamespace:
+    payload = dict(kwargs)
+    return SimpleNamespace(to_dict=lambda: payload, **kwargs)
+
+
+def _message(
+    content: list[Any], *, stop_reason: str = "end_turn", **extra: Any
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        content=content,
+        stop_reason=stop_reason,
+        model="claude-opus-5",
+        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        **extra,
+    )
+
+
+def _client(sdk: _StubSDK, **kwargs: Any) -> ClaudeClient:
+    return ClaudeClient(api_key="sk-ant-test-key", client=sdk, **kwargs)
+
+
+def test_a_missing_key_is_a_configuration_error() -> None:
+    with pytest.raises(ConfigurationError, match="ANTHROPIC_API_KEY"):
+        ClaudeClient(api_key="")
+
+
+def test_settings_are_carried_into_the_client() -> None:
+    settings = Settings(
+        _env_file=None,
+        anthropic_api_key="sk-ant-test-key",
+        claude_model="claude-opus-5",
+    )
+    assert ClaudeClient.from_settings(settings).model == "claude-opus-5"
+
+
+async def test_request_shape() -> None:
+    sdk = _StubSDK(_message([_block(type="text", text="hello")]))
+    client = _client(sdk, model="claude-opus-5", effort="high", thinking=True)
+
+    await client.complete(
+        [LLMMessage.user("hi")],
+        system="be brief",
+        tools=[
+            LLMToolSpec("echo", "echo it", {"type": "object", "properties": {}})
+        ],
+    )
+    request = sdk.messages.last_request
+
+    assert request["model"] == "claude-opus-5"
+    assert request["system"] == "be brief"
+    assert request["thinking"] == {"type": "adaptive"}
+    assert request["output_config"]["effort"] == "high"
+    assert request["tools"][0]["name"] == "echo"
+    assert request["messages"][0]["role"] == "user"
+
+
+async def test_a_json_schema_becomes_output_config_format() -> None:
+    sdk = _StubSDK(_message([_block(type="text", text='{"a": 1}')]))
+    schema = {"type": "object", "properties": {"a": {"type": "integer"}}}
+
+    response = await _client(sdk).complete(
+        [LLMMessage.user("hi")], response_schema=schema
+    )
+
+    assert sdk.messages.last_request["output_config"]["format"] == {
+        "type": "json_schema",
+        "schema": schema,
+    }
+    assert response.json() == {"a": 1}
+
+
+async def test_thinking_is_not_disabled_at_high_effort_levels() -> None:
+    """``thinking: disabled`` is rejected at xhigh/max, so it must be omitted."""
+    sdk = _StubSDK(_message([_block(type="text", text="ok")]))
+
+    await _client(sdk, thinking=False, effort="max").complete([LLMMessage.user("hi")])
+    assert "thinking" not in sdk.messages.last_request
+
+    sdk2 = _StubSDK(_message([_block(type="text", text="ok")]))
+    await _client(sdk2, thinking=False, effort="medium").complete(
+        [LLMMessage.user("hi")]
+    )
+    assert sdk2.messages.last_request["thinking"] == {"type": "disabled"}
+
+
+async def test_tool_calls_are_normalized() -> None:
+    sdk = _StubSDK(
+        _message(
+            [
+                _block(type="text", text="let me check"),
+                _block(
+                    type="tool_use",
+                    id="toolu_1",
+                    name="current_time",
+                    input={"timezone": "Asia/Tashkent"},
+                ),
+            ],
+            stop_reason="tool_use",
+        )
+    )
+
+    response = await _client(sdk).complete([LLMMessage.user("what time is it?")])
+
+    assert response.has_tool_calls
+    assert response.tool_calls[0].name == "current_time"
+    assert response.tool_calls[0].arguments == {"timezone": "Asia/Tashkent"}
+    assert response.text == "let me check"
+    assert response.usage.input_tokens == 10
+
+
+async def test_raw_blocks_are_preserved_for_replay() -> None:
+    """Thinking blocks must survive a round trip through the transcript."""
+    sdk = _StubSDK(
+        _message(
+            [
+                _block(type="thinking", thinking="", signature="sig"),
+                _block(type="text", text="done"),
+            ]
+        )
+    )
+
+    response = await _client(sdk).complete([LLMMessage.user("hi")])
+    replayed = response.as_message().to_dict()
+
+    assert replayed["role"] == "assistant"
+    assert replayed["content"][0]["type"] == "thinking"
+    assert replayed["content"][0]["signature"] == "sig"
+
+
+async def test_a_refusal_is_surfaced_as_an_error() -> None:
+    sdk = _StubSDK(
+        _message(
+            [],
+            stop_reason="refusal",
+            stop_details=SimpleNamespace(category="cyber", explanation="no"),
+        )
+    )
+
+    with pytest.raises(LLMError) as exc_info:
+        await _client(sdk).complete([LLMMessage.user("hi")])
+
+    assert exc_info.value.details["category"] == "cyber"
+
+
+async def test_a_timeout_is_translated() -> None:
+    sdk = _StubSDK(error=anthropic.APITimeoutError(request=None))
+    with pytest.raises(LLMTimeoutError):
+        await _client(sdk).complete([LLMMessage.user("hi")])
+
+
+async def test_a_connection_error_is_translated() -> None:
+    sdk = _StubSDK(error=anthropic.APIConnectionError(request=None))
+    with pytest.raises(LLMError, match="Could not reach"):
+        await _client(sdk).complete([LLMMessage.user("hi")])
+
+
+def test_transcript_round_trips_through_json() -> None:
+    message = LLMMessage.user("hello")
+    assert LLMMessage.from_dict(message.to_dict()).text == "hello"
+    assert LLMMessage.from_dict({"role": "user", "content": "plain"}).text == "plain"
