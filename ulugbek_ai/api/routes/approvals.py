@@ -7,11 +7,18 @@ import uuid
 from fastapi import APIRouter, Query
 
 from ulugbek_ai.agent.schemas import AgentRunResponse
-from ulugbek_ai.api.deps import EngineDep, PrincipalDep, SessionDep
+from ulugbek_ai.api.deps import (
+    EngineDep,
+    OptionalRunnerDep,
+    PrincipalDep,
+    SessionDep,
+)
+from ulugbek_ai.agent.repository import AgentRunRepository
 from ulugbek_ai.approvals.manager import ApprovalManager
 from ulugbek_ai.approvals.models import Approval
 from ulugbek_ai.approvals.schemas import ApprovalDecision, ApprovalRead
 from ulugbek_ai.core.enums import ApprovalStatus
+from ulugbek_ai.core.errors import ConfigurationError, NotFoundError
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
@@ -44,12 +51,19 @@ async def approve(
     decision: ApprovalDecision,
     session: SessionDep,
     engine: EngineDep,
+    runner: OptionalRunnerDep,
     principal: PrincipalDep,
+    background: bool = Query(
+        default=False,
+        description="Resume in the background and return the run immediately.",
+    ),
 ) -> AgentRunResponse:
     """Record the approval, then resume the paused run.
 
     Approving is what unblocks the run: the engine picks up exactly the tool
-    call that was gated and carries on from there.
+    call that was gated and carries on from there. With ``background=true`` the
+    resumed run is handed to the runner so a UI can follow it on the event
+    stream instead of waiting on this request.
     """
     manager = ApprovalManager(session)
     approval = await manager.approve(
@@ -57,6 +71,10 @@ async def approve(
         decided_by=decision.decided_by or principal.subject,
         note=decision.note,
     )
+    if background:
+        return await _resume_in_background(
+            session, runner, approval.agent_run_id
+        )
     return await engine.resume(approval.agent_run_id)
 
 
@@ -70,7 +88,12 @@ async def reject(
     decision: ApprovalDecision,
     session: SessionDep,
     engine: EngineDep,
+    runner: OptionalRunnerDep,
     principal: PrincipalDep,
+    background: bool = Query(
+        default=False,
+        description="Resume in the background and return the run immediately.",
+    ),
 ) -> AgentRunResponse:
     """Record the rejection and resume.
 
@@ -83,4 +106,27 @@ async def reject(
         decided_by=decision.decided_by or principal.subject,
         note=decision.note,
     )
+    if background:
+        return await _resume_in_background(
+            session, runner, approval.agent_run_id
+        )
     return await engine.resume(approval.agent_run_id)
+
+
+async def _resume_in_background(
+    session, runner, run_id: uuid.UUID
+) -> AgentRunResponse:
+    """Commit the decision, then let the runner continue the run."""
+    if runner is None:
+        raise ConfigurationError(
+            "Background resume needs the agent runner. Set ANTHROPIC_API_KEY "
+            "and restart the application, or call without background=true."
+        )
+    await session.commit()
+    runner.launch(run_id, resume=True)
+    run = await AgentRunRepository(session).get(run_id)
+    if run is None:  # pragma: no cover - the approval guarantees it exists
+        raise NotFoundError(
+            f"Agent run {run_id} not found.", details={"run_id": str(run_id)}
+        )
+    return AgentRunResponse.snapshot(run)

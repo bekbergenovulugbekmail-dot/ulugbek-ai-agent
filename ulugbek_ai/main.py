@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from ulugbek_ai import __version__
+from ulugbek_ai.agent.runner import BackgroundAgentRunner
 from ulugbek_ai.api.errors import register_exception_handlers
 from ulugbek_ai.api.router import api_router
 from ulugbek_ai.config.settings import Settings, get_settings
@@ -62,7 +63,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         default_timeout_seconds=settings.tool_default_timeout_seconds,
         max_result_chars=settings.tool_max_result_chars,
     )
-    get_database(settings)
+    database = get_database(settings)
+    app.state.runner = (
+        BackgroundAgentRunner(
+            database,
+            llm=app.state.llm,
+            registry=app.state.registry,
+            settings=settings,
+        )
+        if app.state.llm is not None
+        else None
+    )
 
     logger.info(
         "%s %s started in %s with %d tool(s)",
@@ -74,6 +85,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        if app.state.runner is not None:
+            await app.state.runner.drain()
         if app.state.llm is not None:
             await app.state.llm.aclose()
         await reset_database()

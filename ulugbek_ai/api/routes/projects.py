@@ -6,11 +6,18 @@ import uuid
 
 from fastapi import APIRouter, Query, status
 
-from ulugbek_ai.api.deps import PrincipalDep, SessionDep
+from pydantic import BaseModel, Field
+
+from ulugbek_ai.api.deps import EventServiceDep, PrincipalDep, SessionDep
 from ulugbek_ai.core.enums import ProjectStatus
 from ulugbek_ai.projects.manager import ProjectManager
 from ulugbek_ai.projects.models import Project
 from ulugbek_ai.projects.schemas import ProjectCreate, ProjectRead, ProjectUpdate
+from ulugbek_ai.events.schemas import AgentEvent
+from ulugbek_ai.memory.manager import MemoryManager
+from ulugbek_ai.memory.schemas import MemoryRead
+from ulugbek_ai.tasks.manager import TaskManager
+from ulugbek_ai.tasks.schemas import TaskRead
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -54,3 +61,45 @@ async def update_project(
     principal: PrincipalDep,
 ) -> Project:
     return await ProjectManager(session).update(project_id, payload)
+
+
+class ProjectOverview(BaseModel):
+    """A project plus everything its detail page shows.
+
+    Served as one request so the page does not fan out into five.
+    """
+
+    project: ProjectRead
+    tasks: list[TaskRead] = Field(default_factory=list)
+    memories: list[MemoryRead] = Field(default_factory=list)
+    activity: list[AgentEvent] = Field(default_factory=list)
+    integrations: list[str] = Field(default_factory=list)
+
+
+@router.get(
+    "/{project_id}/overview",
+    response_model=ProjectOverview,
+    summary="A project with its tasks, memory and recent activity",
+)
+async def project_overview(
+    project_id: uuid.UUID,
+    session: SessionDep,
+    events: EventServiceDep,
+    task_limit: int = Query(default=10, ge=1, le=50),
+    memory_limit: int = Query(default=10, ge=1, le=50),
+    activity_limit: int = Query(default=20, ge=1, le=100),
+) -> ProjectOverview:
+    project = await ProjectManager(session).get(project_id)
+    tasks = await TaskManager(session).list(project_id=project_id, limit=task_limit)
+    memories = await MemoryManager(session).list_memories(
+        project_id=project_id, limit=memory_limit
+    )
+    activity = await events.recent(project_id=project_id, limit=activity_limit)
+
+    return ProjectOverview(
+        project=ProjectRead.model_validate(project),
+        tasks=[TaskRead.model_validate(task) for task in tasks],
+        memories=[MemoryRead.model_validate(memory) for memory in memories],
+        activity=activity.events,
+        integrations=sorted(project.integrations or {}),
+    )

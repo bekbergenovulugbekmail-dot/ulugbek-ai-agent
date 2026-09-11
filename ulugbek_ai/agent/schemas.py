@@ -63,6 +63,28 @@ class AgentRunResponse(BaseModel):
     def needs_approval(self) -> bool:
         return self.status == RunStatus.WAITING_APPROVAL
 
+    @classmethod
+    def snapshot(cls, run: Any, task: Any | None = None) -> "AgentRunResponse":
+        """Current state of a run, without executing anything.
+
+        Used by the endpoints that hand a run off to the background runner: the
+        client gets the run id straight away and follows the rest on the event
+        stream.
+        """
+        return cls(
+            run_id=run.id,
+            task_id=task.id if task is not None else run.task_id,
+            project_id=run.project_id,
+            status=RunStatus(run.status),
+            task_status=TaskStatus(task.status) if task is not None else None,
+            output=run.output,
+            error=run.error,
+            iterations=run.iterations,
+            replans=run.replans,
+            tools_used=list((run.extra or {}).get("tools_used", [])),
+            token_usage=dict(run.token_usage or {}),
+        )
+
 
 class AgentStepRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)

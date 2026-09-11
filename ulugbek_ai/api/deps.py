@@ -15,9 +15,11 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ulugbek_ai.agent.engine import AgentEngine
+from ulugbek_ai.agent.runner import BackgroundAgentRunner
 from ulugbek_ai.config.settings import Settings, get_settings
 from ulugbek_ai.core.errors import ConfigurationError
-from ulugbek_ai.database.session import get_database
+from ulugbek_ai.database.session import Database, get_database
+from ulugbek_ai.events.service import EventService
 from ulugbek_ai.llm.base import LLMClient
 from ulugbek_ai.tools.registry import ToolRegistry
 
@@ -63,12 +65,48 @@ def registry_dependency(request: Request) -> ToolRegistry:
     return registry
 
 
+def database_dependency() -> Database:
+    """The shared :class:`Database`.
+
+    Streaming endpoints need to open their own short-lived sessions rather than
+    hold the request-scoped one open for the life of the connection.
+    """
+    return get_database()
+
+
+def optional_runner_dependency(
+    request: Request,
+) -> BackgroundAgentRunner | None:
+    """The background runner, or ``None`` when the agent is not configured.
+
+    Routes that only *optionally* run work in the background depend on this, so
+    a missing API key does not break their synchronous path.
+    """
+    return getattr(request.app.state, "runner", None)
+
+
+def runner_dependency(request: Request) -> BackgroundAgentRunner:
+    """The background runner; required, so a missing one is an error."""
+    runner = optional_runner_dependency(request)
+    if runner is None:
+        raise ConfigurationError(
+            "The agent runner is not configured. Set ANTHROPIC_API_KEY and "
+            "restart the application."
+        )
+    return runner
+
+
 def require_principal() -> Principal:
     """Authentication seam. Replace this to enforce real credentials."""
     return Principal()
 
 
 SessionDep = Annotated[AsyncSession, Depends(session_dependency)]
+DatabaseDep = Annotated[Database, Depends(database_dependency)]
+RunnerDep = Annotated[BackgroundAgentRunner, Depends(runner_dependency)]
+OptionalRunnerDep = Annotated[
+    BackgroundAgentRunner | None, Depends(optional_runner_dependency)
+]
 SettingsDep = Annotated[Settings, Depends(settings_dependency)]
 LLMDep = Annotated[LLMClient, Depends(llm_dependency)]
 RegistryDep = Annotated[ToolRegistry, Depends(registry_dependency)]
@@ -86,3 +124,11 @@ def engine_dependency(
 
 
 EngineDep = Annotated[AgentEngine, Depends(engine_dependency)]
+
+
+def event_service_dependency(session: SessionDep) -> EventService:
+    """Event queries bound to this request's session."""
+    return EventService(session)
+
+
+EventServiceDep = Annotated[EventService, Depends(event_service_dependency)]

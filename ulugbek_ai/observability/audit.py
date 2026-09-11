@@ -66,6 +66,15 @@ class AuditLogger:
         )
         self._session.add(step)
         await self._session.flush()
+        # Checkpoint the run here rather than at the end.
+        #
+        # A run is a long-lived process, not an atomic unit: its progress has to
+        # be visible to other sessions *while it is still going* — that is what
+        # makes the live event stream live, and what lets a crashed run be
+        # resumed from its last recorded step. Every state change the outside
+        # world cares about passes through this method, so committing here (and
+        # only here) keeps that guarantee in one place.
+        await self._session.commit()
         return step
 
     # -- Convenience wrappers, one per trace category ---------------------- #

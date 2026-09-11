@@ -34,3 +34,9 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# Frontend (see frontend/.gitignore for the rest)
+node_modules/
+.next/
+*.tsbuildinfo
+next-env.d.ts

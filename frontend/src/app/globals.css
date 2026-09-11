@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-canvas text-ink antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /* A console scrollbar: present, but never the loudest thing on screen. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.18);
+    background-clip: content-box;
+  }
+
+  *:focus-visible {
+    @apply outline-none ring-2 ring-accent/70 ring-offset-2 ring-offset-canvas;
+  }
+}
+
+@layer components {
+  .panel {
+    /* min-w-0: as a grid/flex child a panel must be allowed to shrink below
+       its content's min-content width, or long unbroken strings push the
+       whole page wider on narrow screens. */
+    @apply min-w-0 rounded-xl border border-line bg-surface;
+  }
+
+  .panel-hover {
+    @apply transition-colors duration-150 hover:border-line-strong hover:bg-elevated;
+  }
+
+  .label-caps {
+    @apply text-2xs font-medium uppercase tracking-wider text-ink-faint;
+  }
+
+  /* The page gradient: a single, very low-contrast wash that gives the
+     console depth without introducing another colour. */
+  .app-backdrop {
+    background-image:
+      radial-gradient(
+        60rem 40rem at 15% -10%,
+        rgba(91, 124, 250, 0.08),
+        transparent 60%
+      ),
+      radial-gradient(
+        50rem 30rem at 100% 0%,
+        rgba(56, 189, 248, 0.05),
+        transparent 55%
+      );
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

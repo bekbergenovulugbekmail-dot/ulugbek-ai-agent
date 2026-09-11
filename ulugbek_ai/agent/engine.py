@@ -116,12 +116,70 @@ class AgentEngine:
 
     # ==================================================================== run #
     async def run(self, request: AgentRunRequest) -> AgentRunResponse:
-        """Execute a user request end to end."""
+        """Execute a user request end to end, returning only when it settles."""
+        run, resolution = await self.start(request)
+        return await self._continue(request, resolution, run)
+
+    async def start(self, request: AgentRunRequest) -> tuple[AgentRun, _Resolution]:
+        """Resolve the request and persist the run row, without executing it.
+
+        Split out so a caller can hand the run id straight back to a client and
+        execute the loop in the background — which is what lets a UI stream the
+        activity of a run that is still in flight.
+        """
         resolution = await self._resolve(request)
         run = await self._create_run(request, resolution)
         audit = AuditLogger(
             self._session, run_id=run.id, task_id=resolution.task.id
         )
+        await audit.record(
+            StepType.AGENT_STARTED,
+            summary="Request received",
+            payload={"project_id": str(run.project_id) if run.project_id else None},
+        )
+        return run, resolution
+
+    async def execute(self, run_id: uuid.UUID) -> AgentRunResponse:
+        """Execute a run created by :meth:`start`.
+
+        Used by the background runner, which picks the run up in a fresh
+        session — so everything it needs is rebuilt from the persisted row.
+        """
+        run = await self._runs.get(run_id)
+        if run is None:
+            raise NotFoundError(
+                f"Agent run {run_id} not found.", details={"run_id": str(run_id)}
+            )
+        if run.status is not RunStatus.RUNNING:
+            raise ConflictError(
+                f"Run {run_id} is {run.status} and cannot be executed.",
+                details={"run_id": str(run_id), "status": str(run.status)},
+            )
+
+        task = await self._tasks.get(run.task_id) if run.task_id else None
+        if task is None:
+            raise ConflictError(
+                f"Run {run_id} has no task to execute.",
+                details={"run_id": str(run_id)},
+            )
+        project = (
+            await self._projects.get(run.project_id) if run.project_id else None
+        )
+        resolution = _Resolution(user_id=run.user_id, project=project, task=task)
+        request = AgentRunRequest(message=run.input, project_id=run.project_id)
+        return await self._continue(request, resolution, run)
+
+    async def _continue(
+        self,
+        request: AgentRunRequest,
+        resolution: _Resolution,
+        run: AgentRun,
+    ) -> AgentRunResponse:
+        """Plan, then drive the loop, for a run that already exists."""
+        audit = AuditLogger(
+            self._session, run_id=run.id, task_id=resolution.task.id
+        )
+        audit.set_sequence(await self._runs.max_step_sequence(run.id))
 
         try:
             plan, system_prompt = await self._prepare(
@@ -330,6 +388,11 @@ class AgentEngine:
                 )
                 continue
 
+            await audit.record(
+                StepType.VERIFICATION_STARTED,
+                summary="Verifying the result",
+                iteration=iteration,
+            )
             verification = await self._verifier.verify(
                 goal=task.goal,
                 answer=answer,

@@ -304,3 +304,205 @@ async def test_a_missing_api_key_is_a_clear_503(client: AsyncClient) -> None:
     assert response.json()["error"]["code"] == "configuration_error"
     assert "ANTHROPIC_API_KEY" in response.json()["error"]["message"]
     assert (await client.get("/api/health")).status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# Control-centre endpoints (Phase 2)
+# --------------------------------------------------------------------------- #
+async def test_system_overview_feeds_the_dashboard(
+    client: AsyncClient, llm: ScriptedLLMClient
+) -> None:
+    await client.post("/api/projects", json={"name": "ERP"})
+    llm.queue(plan_reply(("Answer", None, "answered")))
+    llm.queue(text_response("done"))
+    llm.queue(verdict_reply())
+    await client.post("/api/agent/run", json={"message": "hi"})
+
+    body = (await client.get("/api/system/overview")).json()
+
+    assert body["counters"]["projects"] == 1
+    assert body["counters"]["completed_tasks"] == 1
+    assert body["counters"]["pending_approvals"] == 0
+    assert body["agent"]["phase"] == "COMPLETED"
+    assert {c["name"] for c in body["components"]} == {
+        "API",
+        "Database",
+        "Claude",
+        "Tool Registry",
+    }
+    assert body["tasks_by_status"]["COMPLETED"] == 1
+
+
+async def test_overview_never_exposes_the_api_key(client: AsyncClient) -> None:
+    body = (await client.get("/api/system/overview")).json()
+    claude = next(c for c in body["components"] if c["name"] == "Claude")
+
+    assert claude["status"] == "unconfigured"
+    assert "sk-" not in str(body)
+
+
+async def test_run_events_endpoint_returns_a_timeline(
+    client: AsyncClient, llm: ScriptedLLMClient
+) -> None:
+    llm.queue(plan_reply(("Compute", "calculate", "a number")))
+    llm.queue(tool_response("calculate", {"expression": "2+2"}))
+    llm.queue(text_response("4"))
+    llm.queue(verdict_reply())
+    run_id = (
+        await client.post("/api/agent/run", json={"message": "2+2?"})
+    ).json()["run_id"]
+
+    body = (await client.get(f"/api/events/runs/{run_id}")).json()
+    types = [event["type"] for event in body["events"]]
+
+    assert "agent.started" in types
+    assert "tool.completed" in types
+    assert "task.completed" in types
+    assert body["cursor"] is not None
+
+
+async def test_global_activity_feed(client: AsyncClient, llm: ScriptedLLMClient) -> None:
+    llm.queue(plan_reply(("Answer", None, "answered")))
+    llm.queue(text_response("done"))
+    llm.queue(verdict_reply())
+    await client.post("/api/agent/run", json={"message": "hi"})
+
+    body = (await client.get("/api/events", params={"limit": 5})).json()
+
+    assert body["events"]
+    assert all(event["safe_message"] for event in body["events"])
+
+
+async def test_agent_state_endpoint(client: AsyncClient) -> None:
+    body = (await client.get("/api/events/state")).json()
+
+    assert body["phase"] == "IDLE"
+    assert body["busy"] is False
+    assert body["label"] == "Idle"
+
+
+async def test_tool_execution_history(client: AsyncClient, llm: ScriptedLLMClient) -> None:
+    llm.queue(plan_reply(("Compute", "calculate", "a number")))
+    llm.queue(tool_response("calculate", {"expression": "6*7"}))
+    llm.queue(text_response("42"))
+    llm.queue(verdict_reply())
+    await client.post("/api/agent/run", json={"message": "6*7?"})
+
+    body = (await client.get("/api/tools/executions")).json()
+
+    assert len(body) == 1
+    assert body[0]["tool_name"] == "calculate"
+    assert body[0]["status"] == "SUCCESS"
+    assert body[0]["permission"] == "READ"
+
+
+async def test_tool_execution_arguments_are_redacted(
+    client: AsyncClient, llm: ScriptedLLMClient, registry
+) -> None:
+    class TokenTool(Tool):
+        name = "token_tool"
+        description = "Takes a token."
+        permission = PermissionLevel.READ
+        input_schema = {
+            "type": "object",
+            "properties": {"api_key": {"type": "string"}},
+            "additionalProperties": False,
+        }
+
+        async def execute(self, arguments, context) -> ToolResult:
+            return ToolResult.success("ok")
+
+    registry.register(TokenTool())
+    llm.queue(plan_reply(("Use it", "token_tool", "ok")))
+    llm.queue(tool_response("token_tool", {"api_key": "sk-ant-0123456789abcdef"}))
+    llm.queue(text_response("done"))
+    llm.queue(verdict_reply())
+    await client.post("/api/agent/run", json={"message": "use the token"})
+
+    body = (await client.get("/api/tools/executions")).json()
+
+    assert body[0]["arguments"]["api_key"] == "***REDACTED***"
+
+
+async def test_project_overview_is_one_request(
+    client: AsyncClient, llm: ScriptedLLMClient
+) -> None:
+    project_id = (
+        await client.post(
+            "/api/projects", json={"name": "ERP", "keywords": ["invoice"]}
+        )
+    ).json()["id"]
+    await client.post(
+        "/api/memory",
+        json={
+            "type": MemoryType.PROJECT_CONTEXT.value,
+            "content": "Invoices start at 1000.",
+            "project_id": project_id,
+        },
+    )
+    llm.queue(plan_reply(("Answer", None, "answered")))
+    llm.queue(text_response("They start at 1000."))
+    llm.queue(verdict_reply())
+    await client.post("/api/agent/run", json={"message": "invoice numbering in ERP?"})
+
+    body = (await client.get(f"/api/projects/{project_id}/overview")).json()
+
+    assert body["project"]["slug"] == "erp"
+    assert len(body["tasks"]) == 1
+    assert body["memories"]
+    assert body["activity"]
+
+
+async def test_async_run_returns_immediately_then_completes(
+    client: AsyncClient, llm: ScriptedLLMClient
+) -> None:
+    """The endpoint a UI uses: run id now, activity streamed after."""
+    import asyncio
+
+    llm.queue(plan_reply(("Answer", None, "answered")))
+    llm.queue(text_response("Tashkent."))
+    llm.queue(verdict_reply())
+
+    started = await client.post("/api/agent/runs", json={"message": "capital?"})
+    body = started.json()
+
+    assert started.status_code == 202
+    assert body["status"] == "RUNNING"
+    assert body["output"] is None
+
+    runner = client._transport.app.state.runner  # type: ignore[attr-defined]
+    for _ in range(200):
+        if runner.active_count == 0:
+            break
+        await asyncio.sleep(0.02)
+
+    finished = (await client.get(f"/api/agent/runs/{body['run_id']}")).json()
+    assert finished["status"] == "COMPLETED"
+    assert finished["output"] == "Tashkent."
+
+
+async def test_event_stream_emits_frames(
+    client: AsyncClient, llm: ScriptedLLMClient
+) -> None:
+    """SSE: the transport a live timeline uses."""
+    llm.queue(plan_reply(("Answer", None, "answered")))
+    llm.queue(text_response("done"))
+    llm.queue(verdict_reply())
+    run_id = (
+        await client.post("/api/agent/run", json={"message": "hi"})
+    ).json()["run_id"]
+
+    frames = ""
+    async with client.stream(
+        "GET", f"/api/events/runs/{run_id}/stream"
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        async for chunk in response.aiter_text():
+            frames += chunk
+            if "event: done" in frames:
+                break
+
+    assert "event: agent-event" in frames
+    assert "event: agent-state" in frames
+    assert '"type": "agent.started"' in frames

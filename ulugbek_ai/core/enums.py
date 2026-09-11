@@ -146,6 +146,7 @@ class RunStatus(StrEnum):
 class StepType(StrEnum):
     """Audit trace entry types (see ``agent.models.AgentStep``)."""
 
+    AGENT_STARTED = "agent_started"
     AGENT_RUN = "agent_run"
     TASK = "task"
     PLAN = "plan"
@@ -155,6 +156,7 @@ class StepType(StrEnum):
     TOOL_RESULT = "tool_result"
     PERMISSION = "permission"
     APPROVAL = "approval"
+    VERIFICATION_STARTED = "verification_started"
     VERIFICATION = "verification"
     ERROR = "error"
     FINAL_RESULT = "final_result"

@@ -15,7 +15,12 @@ from ulugbek_ai.agent.schemas import (
     AgentRunResponse,
     AgentStepRead,
 )
-from ulugbek_ai.api.deps import EngineDep, PrincipalDep, SessionDep
+from ulugbek_ai.api.deps import (
+    EngineDep,
+    PrincipalDep,
+    RunnerDep,
+    SessionDep,
+)
 from ulugbek_ai.core.enums import RunStatus
 from ulugbek_ai.core.errors import NotFoundError
 
@@ -32,6 +37,33 @@ async def run_agent(
     with the approval that must be decided before the run can continue.
     """
     return await engine.run(payload)
+
+
+@router.post(
+    "/runs",
+    response_model=AgentRunResponse,
+    status_code=202,
+    summary="Start a run in the background and return immediately",
+)
+async def start_agent_run(
+    payload: AgentRunRequest,
+    engine: EngineDep,
+    runner: RunnerDep,
+    session: SessionDep,
+    principal: PrincipalDep,
+) -> AgentRunResponse:
+    """Create the run, hand it to the background runner, and return its id.
+
+    This is the endpoint a user interface uses: the caller gets ``run_id``
+    straight away and follows the work on ``/events/runs/{run_id}/stream``,
+    instead of holding a request open for the length of the run.
+    """
+    run, resolution = await engine.start(payload)
+    # Commit before launching: the background task opens its own session and
+    # must be able to see the row.
+    await session.commit()
+    runner.launch(run.id)
+    return AgentRunResponse.snapshot(run, resolution.task)
 
 
 @router.post(

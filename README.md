@@ -6,12 +6,18 @@ The agent understands a request, loads only the context that matters, plans,
 picks and runs tools under a permission policy, checks its own work, and stops
 to ask a human before doing anything dangerous.
 
-> **Phase 1 scope.** This repository contains the agent core only. ERP,
-> Telegram, Instagram, GitHub, Railway and browser integrations are later
-> phases. Every one of them plugs in as a `Tool` subclass and a `Project`
-> integration binding — no change to the engine, the permission system or the
-> API is required. The extension points are real and exercised by tests, not
-> TODOs.
+The repository holds two halves:
+
+| | |
+|---|---|
+| **Agent engine** (`ulugbek_ai/`) | the brain — plans, uses tools, verifies, asks permission |
+| **Web Control Center** (`frontend/`) | the console — watch it work and give it orders from a browser |
+
+> **Scope.** ERP, Telegram, Instagram, GitHub, Railway and browser integrations
+> are later phases. Every one of them plugs in as a `Tool` subclass and a
+> `Project` integration binding — no change to the engine, the permission
+> system, the API or the UI is required. The extension points are real and
+> exercised by tests, not TODOs.
 
 ---
 
@@ -19,6 +25,7 @@ to ask a human before doing anything dangerous.
 
 - [The agent loop](#the-agent-loop)
 - [Architecture](#architecture)
+- [Web Control Center](#web-control-center)
 - [Installation](#installation)
 - [Environment variables](#environment-variables)
 - [Local development](#local-development)
@@ -74,7 +81,11 @@ Dependencies point in one direction. `core` knows nothing about anything else;
 the agent knows nothing about SQL or the Anthropic SDK.
 
 ```
-                 ┌──────────┐
+        ┌─────────────────────────┐
+        │  frontend/  (Next.js)   │  browser console — talks HTTP only
+        └────────────┬────────────┘
+                     │ REST + Server-Sent Events
+                 ┌───┴──────┐
                  │   api    │  thin routes, error translation, auth seam
                  └────┬─────┘
                       │
@@ -120,12 +131,111 @@ ulugbek_ai/
 ├── approvals/       human-in-the-loop approval lifecycle
 ├── agent/           context · planner · executor · verifier · engine + trace models
 ├── observability/   redacting logger + durable audit trail
+├── events/          audit trail projected into a client-facing event stream
 ├── api/             routes, dependencies, error handlers
 └── main.py          application factory
+
+frontend/
+├── src/app/         one route per page (App Router)
+├── src/components/  layout · agent · cards · system · ui primitives
+├── src/lib/api/     the central API client — components never call fetch
+├── src/lib/hooks/   useResource (load/poll) · useRunStream (SSE) · useDebounced
+└── tests/           vitest + Testing Library
 ```
 
 **Technology:** Python 3.11 · FastAPI · SQLAlchemy 2.0 (async) · Alembic ·
 PostgreSQL · Pydantic v2 · Anthropic SDK · Docker · Railway. Async throughout.
+
+---
+
+## Web Control Center
+
+A dark, focused operations console — not an admin panel. Desktop is the primary
+target; it works down to phone width.
+
+```bash
+cd frontend
+npm install
+cp .env.example .env.local        # NEXT_PUBLIC_API_BASE_URL -> your backend
+npm run dev                       # http://localhost:3000
+```
+
+**Stack:** Next.js 15 (App Router) · TypeScript (strict) · Tailwind CSS ·
+Vitest + Testing Library. It is a pure client of the API: it imports no backend
+code, holds no secrets, and needs only `NEXT_PUBLIC_API_BASE_URL`.
+
+### Pages
+
+| Page | What it is for |
+|---|---|
+| **Dashboard** | Greeting, counters, pending approvals, recent activity, system health, and a command box |
+| **Agent** | The main screen: conversation on the left, live activity on the right |
+| **Projects** | Every project; a detail page with tasks, memory, activity and integrations |
+| **Tasks** | Filter by status; a detail page with the plan, execution timeline and tool runs |
+| **Memory** | Browse by type, search by relevance (debounced) |
+| **Approvals** | The approval centre — approve or reject a gated action |
+| **Tools** | The registry with permission levels, plus execution history |
+| **Activity** | One global timeline, filtered by kind and project |
+| **Settings** | Connection, health and the permission model |
+
+### Live activity
+
+`POST /api/agent/runs` returns a `run_id` **immediately** and executes the run in
+the background, so the console can follow the work instead of blocking on it.
+`useRunStream` then subscribes to `GET /api/events/runs/{id}/stream`
+(Server-Sent Events) and falls back to polling if the browser cannot hold the
+stream open — both paths feed the same reducer, so the rest of the UI never
+learns which is in use.
+
+The status is always a concrete phase — *Loading context*, *Planning*, *Using a
+tool*, *Verifying the result* — never a bare spinner. The model's private
+reasoning is never shown: every line comes from the redacted audit trail.
+
+### The event model
+
+There is no second event table. The agent already writes a complete, redacted
+trace to `agent_steps`, and `ulugbek_ai/events/` **projects** those rows into a
+stable wire shape:
+
+```jsonc
+{
+  "id": "…", "run_id": "…", "task_id": "…", "project_id": "…",
+  "sequence": 7, "iteration": 2,
+  "type": "tool.completed",        // agent.started · agent.planning · context.loaded
+                                   // tool.started/completed/failed · approval.required
+                                   // verification.started/completed · task.completed/failed
+  "status": "success",             // info · running · success · failure · waiting
+  "timestamp": "…",
+  "safe_message": "Tool calculate: ok",
+  "subject": "calculate",
+  "metadata": { "ok": true, "duration_ms": 42 }   // summarised, never the whole payload
+}
+```
+
+One source of truth, and `metadata` carries no secret because the trail was
+redacted on write. Moving to WebSockets later changes `events.py` and
+`useRunStream.ts` — nothing else.
+
+### Component library
+
+`AgentStatus` · `ActivityTimeline` · `ChatMessage` · `CommandInput` ·
+`ProgressIndicator` · `TaskCard` · `ProjectCard` · `ApprovalCard` ·
+`ToolExecutionCard` · `StatTile` · `HealthIndicator` · `Badge` · `Card` ·
+`Button` · `EmptyState` · `ErrorState` · `LoadingState` / `Skeleton` ·
+`ErrorBoundary` · `FilterTabs`.
+
+Status colours live in one file (`src/lib/status.ts`), so a status can never
+render green on one screen and amber on another.
+
+### Frontend commands
+
+```bash
+npm run dev         # development server
+npm run build       # production build
+npm test            # vitest
+npm run typecheck   # tsc --noEmit
+npm run lint        # eslint
+```
 
 ---
 
@@ -299,7 +409,13 @@ tools (including calculator sandbox escapes) · memory (relevance, scoping,
 budgeting) · projects and routing · task lifecycle · verification · approvals ·
 the Claude adapter (request shape, response normalization, error translation) ·
 the full agent loop (tool use, replanning, iteration cap, approval pause and
-resume) · the HTTP surface.
+resume) · the event projection and live visibility · the background runner ·
+the HTTP surface.
+
+The frontend suite (`cd frontend && npm test`) covers the API client (error
+translation, query building, timeouts), the agent console (sending, streaming,
+approval pause, failure), the approval flow, the command input, the activity
+timeline, the project and task lists, and every loading / empty / error state.
 
 ---
 
@@ -312,7 +428,8 @@ Interactive documentation: `/docs`. All routes are under `API_PREFIX`
 |---|---|---|
 | `GET` | `/api/health` | Liveness, database probe, tool count |
 | `GET` | `/api/health/tools` | Every registered tool with its permission level |
-| `POST` | `/api/agent/run` | Run the agent |
+| `POST` | `/api/agent/run` | Run the agent and wait for the result |
+| `POST` | `/api/agent/runs` | Start a run in the background, return the id at once |
 | `POST` | `/api/agent/runs/{id}/resume` | Resume a run paused for approval |
 | `GET` | `/api/agent/runs` | List runs |
 | `GET` | `/api/agent/runs/{id}` | A run with its full execution trace |
@@ -328,6 +445,14 @@ Interactive documentation: `/docs`. All routes are under `API_PREFIX`
 | `GET` | `/api/approvals/{id}` | Read an approval |
 | `POST` | `/api/approvals/{id}/approve` | Approve **and resume the run** |
 | `POST` | `/api/approvals/{id}/reject` | Reject **and resume the run** |
+| `GET` | `/api/events` | Global activity feed |
+| `GET` | `/api/events/runs/{id}` | Ordered events of one run |
+| `GET` | `/api/events/runs/{id}/stream` | **Live event stream (SSE)** |
+| `GET` | `/api/events/state` | The agent's current phase |
+| `GET` | `/api/tools` | The tool registry |
+| `GET` | `/api/tools/executions` | Tool execution history |
+| `GET` | `/api/system/overview` | Dashboard counters, health and agent state |
+| `GET` | `/api/projects/{id}/overview` | A project with its tasks, memory and activity |
 
 Errors always have the same shape:
 

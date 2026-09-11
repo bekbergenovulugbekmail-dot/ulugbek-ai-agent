@@ -16,6 +16,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ulugbek_ai.agent.runner import BackgroundAgentRunner
 from ulugbek_ai.config.settings import Settings
 from ulugbek_ai.database.base import Base
 from ulugbek_ai.database.registry import import_all_models
@@ -97,7 +98,7 @@ async def client(
     Overriding the session dependency (rather than the global singleton) keeps
     each test on its own engine.
     """
-    from ulugbek_ai.api.deps import session_dependency
+    from ulugbek_ai.api.deps import database_dependency, session_dependency
     from ulugbek_ai.main import create_app
 
     app = create_app(settings)
@@ -107,8 +108,12 @@ async def client(
             yield session
 
     app.dependency_overrides[session_dependency] = override_session
+    app.dependency_overrides[database_dependency] = lambda: database
     app.state.llm = llm
     app.state.registry = registry
+    app.state.runner = BackgroundAgentRunner(
+        database, llm=llm, registry=registry, settings=settings
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as http:
