@@ -146,6 +146,7 @@ describe("ToolExecutionCard", () => {
         execution={{
           id: "e1",
           tool_name: "github_commit",
+          service: "github",
           status: "SUCCESS",
           permission: "EXECUTE",
           arguments: { repository: "ulugbek/erp" },
@@ -162,6 +163,7 @@ describe("ToolExecutionCard", () => {
     );
 
     expect(screen.getByText("Github Commit")).toBeInTheDocument();
+    expect(screen.getByText("GitHub")).toBeInTheDocument();
     expect(screen.getByText("2.4s")).toBeInTheDocument();
     expect(screen.getByText("EXECUTE")).toBeInTheDocument();
     // The raw output must not be rendered.
@@ -174,6 +176,7 @@ describe("ToolExecutionCard", () => {
         execution={{
           id: "e2",
           tool_name: "deploy",
+          service: "railway",
           status: "FAILED",
           permission: "CRITICAL",
           arguments: {},
@@ -191,6 +194,8 @@ describe("ToolExecutionCard", () => {
 
     expect(screen.getByText("GitHub API unavailable")).toBeInTheDocument();
     expect(screen.getByText("FAILED")).toBeInTheDocument();
+    // An integration the UI has never been taught about still renders.
+    expect(screen.getByText("Railway")).toBeInTheDocument();
   });
 });
 
@@ -225,5 +230,17 @@ describe("ErrorState", () => {
 
     await user.click(screen.getByRole("button", { name: /retry/i }));
     expect(onRetry).toHaveBeenCalled();
+  });
+});
+
+describe("service metadata", () => {
+  it("labels known providers and degrades gracefully for unknown ones", async () => {
+    const { serviceMeta } = await import("@/lib/services");
+
+    expect(serviceMeta("github").label).toBe("GitHub");
+    expect(serviceMeta("railway").label).toBe("Railway");
+    // A provider added on the backend before the UI knows about it.
+    expect(serviceMeta("bitbucket").label).toBe("Bitbucket");
+    expect(serviceMeta(null).label).toBe("Local");
   });
 });

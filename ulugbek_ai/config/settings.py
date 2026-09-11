@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     claude_timeout_seconds: Annotated[float, Field(gt=0)] = 120.0
     claude_max_retries: Annotated[int, Field(ge=0, le=10)] = 2
 
+    # --- GitHub integration ------------------------------------------------ #
+    #: A fine-grained PAT or an installation token. Read from the environment
+    #: only; never written to a log, an audit row or an API response.
+    github_token: SecretStr | None = None
+    github_api_url: str = "https://api.github.com"
+    github_timeout_seconds: Annotated[float, Field(gt=0)] = 20.0
+
     # --- Agent loop -------------------------------------------------------- #
     agent_max_iterations: Annotated[int, Field(ge=1, le=100)] = 8
     agent_max_replans: Annotated[int, Field(ge=0, le=20)] = 2

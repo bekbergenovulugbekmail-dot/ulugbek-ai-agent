@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from jsonschema import Draft202012Validator
 from jsonschema import ValidationError as SchemaValidationError
@@ -34,6 +34,9 @@ from ulugbek_ai.core.redaction import redact, truncate
 from ulugbek_ai.llm.base import LLMToolSpec
 from ulugbek_ai.tools.base import Tool, ToolContext, ToolResult, ToolVerification
 from ulugbek_ai.tools.permissions import PermissionDecision, PermissionService
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ulugbek_ai.config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -226,11 +229,13 @@ def build_default_registry(
     permissions: PermissionService | None = None,
     default_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     max_result_chars: int = DEFAULT_MAX_RESULT_CHARS,
+    settings: "Settings | None" = None,
 ) -> ToolRegistry:
-    """Registry pre-loaded with the built-in tools.
+    """Registry pre-loaded with the built-in tools and enabled integrations.
 
-    Phase 1 ships only safe, local tools. External integrations (GitHub,
-    Railway, Telegram, Instagram, browser, ERP) plug in here in later phases.
+    Local tools are always present. A service integration is added when its
+    configuration is available — pass ``settings`` to switch GitHub on. Railway,
+    Telegram, Instagram, browser and ERP plug in here the same way.
     """
     from ulugbek_ai.tools.builtin import default_tools
 
@@ -240,4 +245,23 @@ def build_default_registry(
         max_result_chars=max_result_chars,
     )
     registry.register_all(default_tools())
+
+    if settings is not None:
+        registry.register_all(_integration_tools(settings))
     return registry
+
+
+def _integration_tools(settings: "Settings") -> list[Tool]:
+    """Tools for every integration this configuration enables.
+
+    GitHub is registered unconditionally: the read tools work against public
+    repositories without a token, and a missing token produces a clear message
+    at call time rather than a silently absent capability.
+    """
+    from ulugbek_ai.integrations.github import github_tools
+
+    return github_tools(
+        token=settings.github_token,
+        api_url=settings.github_api_url,
+        timeout_seconds=settings.github_timeout_seconds,
+    )

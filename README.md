@@ -13,11 +13,11 @@ The repository holds two halves:
 | **Agent engine** (`ulugbek_ai/`) | the brain — plans, uses tools, verifies, asks permission |
 | **Web Control Center** (`frontend/`) | the console — watch it work and give it orders from a browser |
 
-> **Scope.** ERP, Telegram, Instagram, GitHub, Railway and browser integrations
-> are later phases. Every one of them plugs in as a `Tool` subclass and a
-> `Project` integration binding — no change to the engine, the permission
-> system, the API or the UI is required. The extension points are real and
-> exercised by tests, not TODOs.
+**GitHub is connected.** The agent can read a repository's state, commits, CI
+runs and pull requests, and can open an issue — behind an approval. Railway,
+Telegram, Instagram and ERP are later phases and plug in the same way: a `Tool`
+subclass plus a `Project` integration binding, with no change to the engine, the
+permission system, the API or the UI.
 
 ---
 
@@ -34,6 +34,7 @@ The repository holds two halves:
 - [API](#api)
 - [Memory](#memory)
 - [Tools](#tools)
+- [GitHub integration](#github-integration)
 - [Permissions](#permissions)
 - [Approvals](#approvals)
 - [Verification](#verification)
@@ -299,6 +300,18 @@ committed.** Secrets are read from the environment only.
 | `CLAUDE_TIMEOUT_SECONDS` | `120` | Per-request timeout |
 | `CLAUDE_MAX_RETRIES` | `2` | SDK-level retries |
 
+### GitHub
+
+| Variable | Default | Description |
+|---|---|---|
+| `GITHUB_TOKEN` | *(empty)* | Fine-grained PAT. Empty means public repositories only, at 60 requests/hour. |
+| `GITHUB_API_URL` | `https://api.github.com` | Override for GitHub Enterprise |
+| `GITHUB_TIMEOUT_SECONDS` | `20` | Per-request timeout |
+
+Give the token the least it needs: *Metadata: Read*, *Contents: Read*,
+*Actions: Read*, *Pull requests: Read* — and *Issues: Read and write* only if
+you want `github_create_issue`.
+
 ### Agent loop
 
 | Variable | Default | Description |
@@ -371,6 +384,9 @@ Eight tables:
 | `tool_executions` | every tool call, its result and its verification |
 | `approvals` | gated actions awaiting a human decision |
 
+Migrations: `0001_initial` (the eight tables), `0002_tool_service` (records
+which external service a tool execution spoke to).
+
 ```bash
 alembic upgrade head                          # apply
 alembic revision --autogenerate -m "message"  # create after a model change
@@ -410,6 +426,8 @@ budgeting) · projects and routing · task lifecycle · verification · approval
 the Claude adapter (request shape, response normalization, error translation) ·
 the full agent loop (tool use, replanning, iteration cap, approval pause and
 resume) · the event projection and live visibility · the background runner ·
+the GitHub client (projection, every error path, the token never leaking) and
+its tools (repository resolution, approval gating, verify-by-read-back) ·
 the HTTP surface.
 
 The frontend suite (`cd frontend && npm test`) covers the API client (error
@@ -555,6 +573,71 @@ Built-ins in Phase 1 are local and safe:
 | `memory_write` | WRITE | Store a durable fact; `verify()` re-reads the row to prove the write landed |
 | `project_list` | READ | List known projects |
 
+And the GitHub integration:
+
+| Tool | Permission | Description |
+|---|---|---|
+| `github_repo_info` | READ | Default branch, visibility, language, last push |
+| `github_list_commits` | READ | Recent commits on a branch |
+| `github_workflow_runs` | READ | GitHub Actions runs, with their conclusion |
+| `github_list_pull_requests` | READ | Open / closed pull requests |
+| `github_create_issue` | **EXECUTE** | Open an issue — requires approval, and verifies by reading the issue back |
+
+---
+
+## GitHub integration
+
+```
+ulugbek_ai/integrations/github/
+├── client.py   the API client — the only place the token exists
+└── tools.py    five tools built on it
+```
+
+Two rules the client keeps:
+
+- **The token never leaves `client.py`.** It is a `SecretStr`, sent only as a
+  header. No error message or log line built here can contain it — there is a
+  test that feeds the token back in a GitHub error body and asserts it does not
+  surface.
+- **Responses are projected, not forwarded.** A GitHub payload is tens of
+  kilobytes; the agent needs a handful of fields. Every method returns a small
+  dict, so a tool result cannot flood the model's context.
+
+Failures come back as sentences a person can act on — a rejected credential, a
+rate limit with what to do about it, a 404 that admits it might be a permissions
+problem — never a bare status code.
+
+### The repository comes from the project
+
+You rarely name a repository. Bind it once:
+
+```json
+{ "github": { "repository": "ulugbek/telegram-bot" } }
+```
+
+and ask *"check my Telegram project"*. Every GitHub tool resolves the
+repository the same way: an explicit argument wins, otherwise the current
+project's binding, otherwise it asks rather than guessing. The binding is put in
+front of the model through an **allow-list** of safe fields, so operational
+detail in a binding never leaks into a prompt.
+
+### Writes stop and ask
+
+`github_create_issue` is classified `EXECUTE`, not `WRITE`: anything that
+changes a service other people can see should pause for a human, whatever the
+policy says about local writes. And it does not trust the API's response — its
+`verify()` reads the issue back, so "created" means it is actually there.
+
+### Checking it works
+
+```bash
+python -m scripts.smoke_github owner/repo      # real API, read-only
+python -m scripts.smoke_claude "Check my projects"   # real model, one full run
+```
+
+`smoke_github` only runs the READ tools, so it can never change a repository.
+`smoke_claude` needs `ANTHROPIC_API_KEY` and costs a few cents.
+
 ---
 
 ## Permissions
@@ -674,7 +757,8 @@ Every audit payload is redacted on the way in.
 
 **Add a tool** — subclass `Tool`, register it, done. The registry gives it
 schema validation, permission enforcement, timeouts, crash isolation, redaction
-and audit for free.
+and audit for free. `ulugbek_ai/integrations/github/` is the worked example to
+copy for Railway, Telegram, Instagram or ERP.
 
 ```python
 from ulugbek_ai.core.enums import PermissionLevel

@@ -31,6 +31,7 @@ class ToolExecutionRepository:
         run_id: uuid.UUID | None = None,
         task_id: uuid.UUID | None = None,
         tool_name: str | None = None,
+        service: str | None = None,
         status: ToolExecutionStatus | None = None,
         limit: int = 50,
         offset: int = 0,
@@ -43,6 +44,8 @@ class ToolExecutionRepository:
             statement = statement.where(ToolExecution.task_id == task_id)
         if tool_name is not None:
             statement = statement.where(ToolExecution.tool_name == tool_name)
+        if service is not None:
+            statement = statement.where(ToolExecution.service == service)
         if status is not None:
             statement = statement.where(ToolExecution.status == status)
         statement = (

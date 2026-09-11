@@ -33,6 +33,8 @@ class ToolExecution(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     tool_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    #: Provider the tool spoke to; NULL for a local tool.
+    service: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     status: Mapped[ToolExecutionStatus] = mapped_column(
         EnumString(ToolExecutionStatus, 20), nullable=False
     )

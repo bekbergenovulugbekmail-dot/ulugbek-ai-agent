@@ -337,6 +337,9 @@ class Executor:
         """Persist the audit row for one invocation (arguments are redacted)."""
         execution = ToolExecution(
             tool_name=call.name,
+            service=self._registry.get(call.name).service
+            if self._registry.has(call.name)
+            else None,
             status=status,
             permission=permission,
             arguments=redact(call.arguments),

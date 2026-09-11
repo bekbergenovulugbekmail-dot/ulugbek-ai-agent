@@ -15,6 +15,7 @@ export const toolApi = {
       run_id?: string;
       task_id?: string;
       tool_name?: string;
+      service?: string;
       status?: ToolExecutionStatus;
       limit?: number;
       offset?: number;

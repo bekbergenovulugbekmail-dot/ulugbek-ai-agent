@@ -94,6 +94,24 @@ class ToolVerification:
         return cls(status=VerificationStatus.SKIPPED, reason=reason)
 
 
+def _has_abstract_methods(cls: type) -> bool:
+    """Is *cls* still abstract?
+
+    ``__init_subclass__`` runs before ``ABCMeta`` fills in
+    ``__abstractmethods__``, so that attribute cannot be trusted here. Instead
+    walk the MRO for names declared abstract anywhere and ask whether the
+    version visible on *cls* is still abstract — which is exactly what makes an
+    intermediate base (one that adds its own abstract method, such as a shared
+    integration base) exempt from the name/description rule.
+    """
+    for base in cls.__mro__:
+        for attribute in vars(base):
+            visible = getattr(cls, attribute, None)
+            if getattr(visible, "__isabstractmethod__", False):
+                return True
+    return False
+
+
 class Tool(ABC):
     """Base class for every tool."""
 
@@ -108,6 +126,10 @@ class Tool(ABC):
     output_schema: dict[str, Any] = {}
     #: Risk class. Drives the permission and approval systems.
     permission: PermissionLevel = PermissionLevel.READ
+    #: External service this tool speaks to ("github", "railway", …), or None
+    #: for a local tool. Purely descriptive: it lets one card in the UI render
+    #: every integration without the UI knowing any of them by name.
+    service: str | None = None
     #: Per-tool timeout; ``None`` means "use the configured default".
     timeout_seconds: float | None = None
     #: Tools that mutate external state are never retried automatically.
@@ -115,7 +137,7 @@ class Tool(ABC):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if not getattr(cls, "__abstractmethods__", None):
+        if not _has_abstract_methods(cls):
             if not cls.name:
                 raise ValueError(f"{cls.__name__} must define a non-empty name.")
             if not cls.description:
@@ -165,6 +187,7 @@ class Tool(ABC):
             "input_schema": self.input_schema,
             "output_schema": self.output_schema,
             "permission": self.permission.value,
+            "service": self.service,
             "timeout_seconds": self.timeout_seconds,
             "idempotent": self.idempotent,
         }

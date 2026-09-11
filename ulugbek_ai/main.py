@@ -62,6 +62,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         permissions=PermissionService(PermissionPolicy.from_settings(settings)),
         default_timeout_seconds=settings.tool_default_timeout_seconds,
         max_result_chars=settings.tool_max_result_chars,
+        settings=settings,
     )
     database = get_database(settings)
     app.state.runner = (

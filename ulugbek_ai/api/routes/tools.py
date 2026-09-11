@@ -32,6 +32,7 @@ class ToolExecutionRead(BaseModel):
 
     id: uuid.UUID
     tool_name: str
+    service: str | None
     status: ToolExecutionStatus
     permission: PermissionLevel
     arguments: dict[str, Any]
@@ -61,6 +62,7 @@ async def list_executions(
     run_id: uuid.UUID | None = None,
     task_id: uuid.UUID | None = None,
     tool_name: str | None = None,
+    service: str | None = Query(default=None, description="Filter by provider."),
     status_filter: ToolExecutionStatus | None = Query(default=None, alias="status"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -69,6 +71,7 @@ async def list_executions(
         run_id=run_id,
         task_id=task_id,
         tool_name=tool_name,
+        service=service,
         status=status_filter,
         limit=limit,
         offset=offset,

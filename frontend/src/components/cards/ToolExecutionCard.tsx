@@ -2,6 +2,7 @@
 
 import type { ToolExecution } from "@/lib/api";
 import { cx, formatDuration, formatRelative, humanize } from "@/lib/format";
+import { serviceMeta } from "@/lib/services";
 import { permissionTone, toolTone } from "@/lib/status";
 
 import { Badge } from "../ui/Badge";
@@ -47,6 +48,12 @@ export function ToolExecutionCard({
             <h3 className="truncate text-sm font-medium text-ink">
               {humanize(execution.tool_name)}
             </h3>
+            {execution.service && (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded border border-line px-1.5 py-0.5 text-2xs text-ink-muted">
+                <span aria-hidden>{serviceMeta(execution.service).glyph}</span>
+                {serviceMeta(execution.service).label}
+              </span>
+            )}
           </div>
           <p className="mt-1 pl-8 text-xs text-ink-faint">
             {execution.status === "SUCCESS"

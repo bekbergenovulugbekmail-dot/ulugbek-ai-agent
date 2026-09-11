@@ -11,6 +11,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/ui/States";
 import { toolApi } from "@/lib/api";
 import { humanize } from "@/lib/format";
 import { useResource } from "@/lib/hooks/useResource";
+import { serviceMeta } from "@/lib/services";
 import { permissionTone } from "@/lib/status";
 
 const PAGE_SIZE = 20;
@@ -59,6 +60,12 @@ export default function ToolsPage() {
                     <code className="font-mono text-2xs text-ink-faint">
                       {tool.name}
                     </code>
+                    {tool.service && (
+                      <span className="inline-flex items-center gap-1 rounded border border-line px-1.5 py-0.5 text-2xs text-ink-muted">
+                        <span aria-hidden>{serviceMeta(tool.service).glyph}</span>
+                        {serviceMeta(tool.service).label}
+                      </span>
+                    )}
                   </div>
                   <p className="mt-1 text-xs leading-relaxed text-ink-faint">
                     {tool.description}

@@ -280,6 +280,7 @@ export interface Approval {
 export interface ToolDescriptor {
   name: string;
   description: string;
+  service: string | null;
   input_schema: Record<string, unknown>;
   output_schema: Record<string, unknown>;
   permission: PermissionLevel;
@@ -290,6 +291,7 @@ export interface ToolDescriptor {
 export interface ToolExecution {
   id: string;
   tool_name: string;
+  service: string | null;
   status: ToolExecutionStatus;
   permission: PermissionLevel;
   arguments: Record<string, unknown>;

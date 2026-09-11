@@ -70,6 +70,44 @@ class RunContext:
         }
 
 
+#: Integration fields safe to put in front of the model. Anything not listed is
+#: withheld — a binding is allowed to contain operational detail, and only the
+#: identifiers the agent needs to address a service belong in the prompt.
+_SAFE_INTEGRATION_FIELDS: tuple[str, ...] = (
+    "repository",
+    "branch",
+    "default_branch",
+    "project_id",
+    "environment",
+    "account",
+    "bot_username",
+    "channel",
+    "url",
+)
+
+
+def _describe_integrations(integrations: dict[str, Any]) -> list[str]:
+    """Render each service binding as ``service: key=value`` lines.
+
+    This is what lets the operator say "check my Telegram project" instead of
+    pasting a repository name: the agent reads the binding from the project and
+    passes it to the tool.
+    """
+    lines: list[str] = []
+    for service in sorted(integrations):
+        binding = integrations[service]
+        if not isinstance(binding, dict):
+            lines.append(f"  {service}")
+            continue
+        fields = [
+            f"{key}={binding[key]}"
+            for key in _SAFE_INTEGRATION_FIELDS
+            if binding.get(key)
+        ]
+        lines.append(f"  {service}: {', '.join(fields)}" if fields else f"  {service}")
+    return lines
+
+
 def _describe_project(project: Project) -> str:
     lines = [
         f"name: {project.name}",
@@ -83,7 +121,8 @@ def _describe_project(project: Project) -> str:
     if project.environment:
         lines.append(f"environment: {project.environment}")
     if project.integrations:
-        lines.append(f"integrations: {', '.join(sorted(project.integrations))}")
+        lines.append("integrations:")
+        lines.extend(_describe_integrations(project.integrations))
     return "\n".join(lines)
 
 
