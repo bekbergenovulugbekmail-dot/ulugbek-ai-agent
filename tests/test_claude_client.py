@@ -6,6 +6,7 @@ depend on without ever making a network call.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,7 +17,7 @@ import pytest
 from ulugbek_ai.config.settings import Settings
 from ulugbek_ai.core.errors import ConfigurationError, LLMError, LLMTimeoutError
 from ulugbek_ai.llm.base import LLMMessage, LLMToolSpec
-from ulugbek_ai.llm.claude import ClaudeClient
+from ulugbek_ai.llm.claude import ClaudeClient, sanitize_structured_output_schema
 
 
 class _Messages:
@@ -284,3 +285,99 @@ async def test_the_workspace_error_explains_the_fix() -> None:
 
     assert "ANTHROPIC_WORKSPACE_ID" in exc_info.value.message
     assert "scoped to a single workspace" in exc_info.value.message
+
+
+# --------------------------------------------------------------------------- #
+# Structured-output schema compatibility
+# --------------------------------------------------------------------------- #
+def test_unsupported_schema_keywords_are_stripped() -> None:
+    """Structured outputs reject these with a 400, so they never go out."""
+    cleaned = sanitize_structured_output_schema(
+        {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "items": {"type": "string", "maxLength": 50, "pattern": "^a"},
+                },
+                "score": {"type": "integer", "minimum": 0, "maximum": 5},
+            },
+            "required": ["steps"],
+            "additionalProperties": False,
+        }
+    )
+    rendered = json.dumps(cleaned)
+
+    for keyword in ("maxItems", "maxLength", "pattern", "minimum", "maximum"):
+        assert keyword not in rendered
+    # Supported keywords survive untouched.
+    assert cleaned["properties"]["steps"]["minItems"] == 1
+    assert cleaned["required"] == ["steps"]
+    assert cleaned["additionalProperties"] is False
+
+
+def test_a_dropped_constraint_is_explained_to_the_model() -> None:
+    """Removing a rule silently would change what we are asking for."""
+    cleaned = sanitize_structured_output_schema(
+        {
+            "type": "array",
+            "maxItems": 10,
+            "description": "The plan steps.",
+            "items": {"type": "string"},
+        }
+    )
+
+    assert "The plan steps." in cleaned["description"]
+    assert "at most 10 items" in cleaned["description"]
+
+
+def test_min_items_is_clamped_to_what_the_api_accepts() -> None:
+    """Only 0 and 1 are supported values."""
+    cleaned = sanitize_structured_output_schema(
+        {"type": "array", "minItems": 3, "items": {"type": "string"}}
+    )
+
+    assert cleaned["minItems"] == 1
+    assert "at least 3 items" in cleaned["description"]
+
+
+def test_sanitizing_does_not_modify_the_original_schema() -> None:
+    original = {"type": "array", "maxItems": 4, "items": {"type": "string"}}
+    sanitize_structured_output_schema(original)
+
+    assert original["maxItems"] == 4
+
+
+def test_the_planner_and_verifier_schemas_are_accepted_as_sent() -> None:
+    """Both schemas this app actually sends must survive the API's subset."""
+    from ulugbek_ai.agent.planner import PLAN_SCHEMA
+    from ulugbek_ai.agent.verifier import VERIFICATION_SCHEMA
+
+    for schema in (PLAN_SCHEMA, VERIFICATION_SCHEMA):
+        rendered = json.dumps(sanitize_structured_output_schema(schema))
+        for keyword in (
+            "maxItems",
+            "maxLength",
+            "minLength",
+            "pattern",
+            "minimum",
+            "maximum",
+        ):
+            assert keyword not in rendered, f"{keyword} still present"
+
+
+async def test_the_request_carries_the_sanitized_schema() -> None:
+    sdk = _StubSDK(_message([_block(type="text", text="{}")]))
+
+    await _client(sdk).complete(
+        [LLMMessage.user("hi")],
+        response_schema={
+            "type": "object",
+            "properties": {"a": {"type": "array", "maxItems": 3}},
+        },
+    )
+
+    sent = json.dumps(sdk.messages.last_request["output_config"]["format"]["schema"])
+    assert "maxItems" not in sent

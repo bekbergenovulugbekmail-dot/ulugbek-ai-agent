@@ -7,7 +7,7 @@ Everything above it depends on :class:`~ulugbek_ai.llm.base.LLMClient`.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Final
 
 import anthropic
 
@@ -31,6 +31,83 @@ _HIGH_EFFORT_LEVELS = frozenset({"xhigh", "max"})
 
 #: Names the workspace a multi-workspace key should act in.
 WORKSPACE_HEADER = "anthropic-workspace-id"
+
+
+# --------------------------------------------------------------------------- #
+# Structured-output schemas
+# --------------------------------------------------------------------------- #
+#: Structured outputs accept only a subset of JSON Schema. These keywords are
+#: rejected outright with a 400, so they are stripped before the request goes
+#: out — the constraint is still enforced in our own code after the reply.
+_UNSUPPORTED_SCHEMA_KEYWORDS: Final[tuple[str, ...]] = (
+    "maxItems",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "uniqueItems",
+)
+
+#: ``minItems`` is accepted, but only as 0 or 1.
+_MAX_SUPPORTED_MIN_ITEMS: Final[int] = 1
+
+#: How a dropped constraint is phrased for the model, so intent survives.
+_CONSTRAINT_WORDING: Final[dict[str, str]] = {
+    "maxItems": "at most {value} items",
+    "minItems": "at least {value} items",
+    "minimum": "at least {value}",
+    "maximum": "at most {value}",
+    "minLength": "at least {value} characters",
+    "maxLength": "at most {value} characters",
+    "pattern": "matching {value}",
+}
+
+
+def sanitize_structured_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Make a JSON Schema acceptable to ``output_config.format.schema``.
+
+    Unsupported constraints are removed rather than sent and rejected, and each
+    one is folded into the neighbouring ``description`` so the model still knows
+    what was being asked for — the same trade the official SDKs make. The input
+    is not modified.
+    """
+    return _sanitize_node(schema)
+
+
+def _sanitize_node(node: Any) -> Any:
+    if isinstance(node, list):
+        return [_sanitize_node(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+
+    cleaned: dict[str, Any] = {}
+    dropped: list[str] = []
+
+    for key, value in node.items():
+        if key in _UNSUPPORTED_SCHEMA_KEYWORDS:
+            dropped.append(_describe_constraint(key, value))
+            continue
+        if key == "minItems" and isinstance(value, int) and value > _MAX_SUPPORTED_MIN_ITEMS:
+            dropped.append(_describe_constraint(key, value))
+            cleaned[key] = _MAX_SUPPORTED_MIN_ITEMS
+            continue
+        cleaned[key] = _sanitize_node(value)
+
+    if dropped:
+        note = "Must be " + ", ".join(part for part in dropped if part) + "."
+        existing = cleaned.get("description")
+        cleaned["description"] = f"{existing} {note}".strip() if existing else note
+
+    return cleaned
+
+
+def _describe_constraint(keyword: str, value: Any) -> str:
+    wording = _CONSTRAINT_WORDING.get(keyword)
+    return wording.format(value=value) if wording else ""
 
 
 class ClaudeClient(LLMClient):
@@ -124,7 +201,7 @@ class ClaudeClient(LLMClient):
         if response_schema is not None:
             output_config["format"] = {
                 "type": "json_schema",
-                "schema": response_schema,
+                "schema": sanitize_structured_output_schema(response_schema),
             }
 
         payload["output_config"] = output_config
