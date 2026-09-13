@@ -139,7 +139,11 @@ class GitHubCommitsTool(GitHubTool):
             "repository": _REPOSITORY_PROPERTY,
             "branch": {
                 "type": "string",
-                "description": "Branch name. Defaults to the repository default.",
+                "description": (
+                    "Branch name. Omit this to use the repository's default "
+                    "branch — do not guess 'main' or 'master', many "
+                    "repositories use neither."
+                ),
             },
             "limit": {"type": "integer", "minimum": 1, "maximum": 30},
         },

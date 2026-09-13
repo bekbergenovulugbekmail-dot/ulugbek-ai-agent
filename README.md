@@ -317,7 +317,7 @@ you want `github_create_issue`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `AGENT_MAX_ITERATIONS` | `8` | Hard cap on loop iterations |
+| `AGENT_MAX_ITERATIONS` | `12` | Hard cap on loop iterations |
 | `AGENT_MAX_REPLANS` | `2` | Hard cap on replans after failed verification |
 | `AGENT_RUN_TIMEOUT_SECONDS` | `300` | Wall-clock budget for one run |
 | `AGENT_VERIFICATION_ENABLED` | `true` | Turning this off is a debugging aid, not a production setting |

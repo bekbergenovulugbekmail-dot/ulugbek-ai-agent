@@ -265,6 +265,33 @@ class GitHubClient:
             "url": data.get("html_url"),
         }
 
+    async def _branch_failure(self, repo: str, branch: str) -> GitHubApiError:
+        """Turn a bare 404 into something the caller can act on.
+
+        A 404 on a branch-scoped listing has two very different causes, and
+        saying "not found" covers both uselessly — an agent that cannot tell
+        them apart will retry the same wrong branch forever. One extra request,
+        only on the error path, settles which it is and names the branch to use
+        instead.
+        """
+        try:
+            info = await self.get_repository(repo)
+        except GitHubApiError:
+            return GitHubApiError(
+                f"Repository {repo} could not be read: it does not exist, or "
+                "the token cannot see it.",
+                status=404,
+            )
+        default = info.get("default_branch")
+        return GitHubApiError(
+            f"Branch '{branch}' does not exist in {repo}. "
+            + (f"The default branch is '{default}'. " if default else "")
+            + "Retry without the branch argument to use the default, or pass a "
+            "branch that exists.",
+            status=404,
+            details={"default_branch": default},
+        )
+
     async def list_commits(
         self, repository: str, *, branch: str | None = None, limit: int = 10
     ) -> list[dict[str, Any]]:
@@ -272,7 +299,12 @@ class GitHubClient:
         params: dict[str, Any] = {"per_page": max(1, min(limit, 50))}
         if branch:
             params["sha"] = branch
-        data = await self._request("GET", f"/repos/{repo}/commits", params=params)
+        try:
+            data = await self._request("GET", f"/repos/{repo}/commits", params=params)
+        except GitHubApiError as exc:
+            if exc.status == 404 and branch:
+                raise await self._branch_failure(repo, branch) from exc
+            raise
         return [
             {
                 "sha": entry.get("sha", "")[:12],

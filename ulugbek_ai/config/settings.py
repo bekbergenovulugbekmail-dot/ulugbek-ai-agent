@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     github_timeout_seconds: Annotated[float, Field(gt=0)] = 20.0
 
     # --- Agent loop -------------------------------------------------------- #
-    agent_max_iterations: Annotated[int, Field(ge=1, le=100)] = 8
+    agent_max_iterations: Annotated[int, Field(ge=1, le=100)] = 12
     agent_max_replans: Annotated[int, Field(ge=0, le=20)] = 2
     agent_run_timeout_seconds: Annotated[float, Field(gt=0)] = 300.0
     agent_verification_enabled: bool = True

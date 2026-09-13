@@ -476,3 +476,65 @@ def test_the_tool_description_reaches_the_model() -> None:
     spec = GitHubRepoInfoTool().to_llm_spec()
     assert "default branch" in spec.description
     assert spec.input_schema["additionalProperties"] is False
+
+
+# --------------------------------------------------------------------------- #
+# A 404 on a branch has to say which of the two things is wrong
+# --------------------------------------------------------------------------- #
+async def test_a_missing_branch_names_the_default_instead_of_saying_not_found() -> None:
+    """A dead-end error makes an agent retry the same wrong branch forever.
+
+    This is the failure that broke the first live GitHub run: the model guessed
+    `main`, the repository used a different default, and "not found" told it
+    nothing it could act on.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/commits"):
+            return json_response({"message": "Not Found"}, 404)
+        return json_response(
+            {"full_name": "ulugbek/erp", "default_branch": "develop"}
+        )
+
+    result = await GitHubCommitsTool(client_with(handler)).execute(
+        {"repository": "ulugbek/erp", "branch": "main"}, ToolContext()
+    )
+
+    assert result.ok is False
+    assert "Branch 'main' does not exist" in result.error
+    assert "develop" in result.error
+    assert "Retry without the branch argument" in result.error
+
+
+async def test_a_missing_repository_still_reads_as_a_repository_problem() -> None:
+    """The same 404 must not be blamed on the branch when the repo is gone."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response({"message": "Not Found"}, 404)
+
+    result = await GitHubCommitsTool(client_with(handler)).execute(
+        {"repository": "ulugbek/missing", "branch": "main"}, ToolContext()
+    )
+
+    assert result.ok is False
+    assert "Repository ulugbek/missing could not be read" in result.error
+    assert "Branch" not in result.error
+
+
+async def test_no_extra_request_when_no_branch_was_given() -> None:
+    """The diagnosis costs a request, so it only runs when a branch is in play."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return json_response({"message": "Not Found"}, 404)
+
+    result = await GitHubCommitsTool(client_with(handler)).execute(
+        {"repository": "ulugbek/erp"}, ToolContext()
+    )
+
+    assert result.ok is False
+    assert calls == ["/repos/ulugbek/erp/commits"]
+
+
+def test_the_branch_argument_tells_the_model_not_to_guess() -> None:
+    schema = GitHubCommitsTool().input_schema["properties"]["branch"]
+    assert "do not guess" in schema["description"].lower()
