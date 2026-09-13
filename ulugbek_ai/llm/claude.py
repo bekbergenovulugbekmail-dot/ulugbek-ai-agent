@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 #: Effort levels that are incompatible with thinking being switched off.
 _HIGH_EFFORT_LEVELS = frozenset({"xhigh", "max"})
 
+#: Names the workspace a multi-workspace key should act in.
+WORKSPACE_HEADER = "anthropic-workspace-id"
+
 
 class ClaudeClient(LLMClient):
     """Async Claude client built on :class:`anthropic.AsyncAnthropic`."""
@@ -43,6 +46,7 @@ class ClaudeClient(LLMClient):
         thinking: bool = True,
         timeout_seconds: float = 120.0,
         max_retries: int = 2,
+        workspace_id: str | None = None,
         client: anthropic.AsyncAnthropic | None = None,
     ) -> None:
         if not api_key:
@@ -54,10 +58,16 @@ class ClaudeClient(LLMClient):
         self._max_tokens = max_tokens
         self._effort = effort
         self._thinking = thinking
+        # A key that spans several workspaces runs in the workspace each request
+        # names; without the header such a key is rejected outright.
+        headers = (
+            {WORKSPACE_HEADER: workspace_id} if workspace_id else None
+        )
         self._client = client or anthropic.AsyncAnthropic(
             api_key=api_key,
             timeout=timeout_seconds,
             max_retries=max_retries,
+            default_headers=headers,
         )
 
     # ------------------------------------------------------------------ ctor #
@@ -73,6 +83,7 @@ class ClaudeClient(LLMClient):
             thinking=settings.claude_thinking,
             timeout_seconds=settings.claude_timeout_seconds,
             max_retries=settings.claude_max_retries,
+            workspace_id=settings.anthropic_workspace_id,
         )
 
     # --------------------------------------------------------------- request #
@@ -141,9 +152,17 @@ class ClaudeClient(LLMClient):
                 f"Claude request timed out: {redact_text(str(exc))}"
             ) from exc
         except anthropic.APIStatusError as exc:
+            message = redact_text(str(exc.message))
+            if "not scoped to a workspace" in message:
+                # Point at the fix rather than echoing the API's phrasing.
+                message = (
+                    "This API key spans several workspaces, so each request "
+                    "must name one. Set ANTHROPIC_WORKSPACE_ID (find it in the "
+                    "Console under Settings > Workspaces), or use an API key "
+                    "scoped to a single workspace."
+                )
             raise LLMError(
-                f"Claude API error (HTTP {exc.status_code}): "
-                f"{redact_text(str(exc.message))}",
+                f"Claude API error (HTTP {exc.status_code}): {message}",
                 details={"status_code": exc.status_code},
             ) from exc
         except anthropic.APIConnectionError as exc:

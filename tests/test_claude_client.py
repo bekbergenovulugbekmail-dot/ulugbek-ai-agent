@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import anthropic
+import httpx
 import pytest
 
 from ulugbek_ai.config.settings import Settings
@@ -199,3 +200,87 @@ def test_transcript_round_trips_through_json() -> None:
     message = LLMMessage.user("hello")
     assert LLMMessage.from_dict(message.to_dict()).text == "hello"
     assert LLMMessage.from_dict({"role": "user", "content": "plain"}).text == "plain"
+
+
+# --------------------------------------------------------------------------- #
+# Workspace scoping
+# --------------------------------------------------------------------------- #
+def test_a_workspace_id_is_sent_as_a_header() -> None:
+    """A key spanning several workspaces must name one on every request."""
+    captured: dict[str, Any] = {}
+
+    class _Recording(_StubSDK):
+        pass
+
+    real_ctor = anthropic.AsyncAnthropic
+
+    def fake_ctor(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _Recording(_message([_block(type="text", text="ok")]))
+
+    anthropic.AsyncAnthropic = fake_ctor  # type: ignore[assignment]
+    try:
+        ClaudeClient(api_key="sk-ant-test-key", workspace_id="wrkspc_01ABC")
+    finally:
+        anthropic.AsyncAnthropic = real_ctor  # type: ignore[assignment]
+
+    assert captured["default_headers"] == {
+        "anthropic-workspace-id": "wrkspc_01ABC"
+    }
+
+
+def test_no_workspace_header_when_none_is_configured() -> None:
+    captured: dict[str, Any] = {}
+    real_ctor = anthropic.AsyncAnthropic
+
+    def fake_ctor(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _StubSDK(_message([]))
+
+    anthropic.AsyncAnthropic = fake_ctor  # type: ignore[assignment]
+    try:
+        ClaudeClient(api_key="sk-ant-test-key")
+    finally:
+        anthropic.AsyncAnthropic = real_ctor  # type: ignore[assignment]
+
+    assert captured["default_headers"] is None
+
+
+def test_the_workspace_id_comes_from_settings() -> None:
+    settings = Settings(
+        _env_file=None,
+        anthropic_api_key="sk-ant-test-key",
+        anthropic_workspace_id="wrkspc_01XYZ",
+    )
+    captured: dict[str, Any] = {}
+    real_ctor = anthropic.AsyncAnthropic
+
+    def fake_ctor(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _StubSDK(_message([]))
+
+    anthropic.AsyncAnthropic = fake_ctor  # type: ignore[assignment]
+    try:
+        ClaudeClient.from_settings(settings)
+    finally:
+        anthropic.AsyncAnthropic = real_ctor  # type: ignore[assignment]
+
+    assert captured["default_headers"]["anthropic-workspace-id"] == "wrkspc_01XYZ"
+
+
+async def test_the_workspace_error_explains_the_fix() -> None:
+    """The API's wording does not say what to do; ours must."""
+    sdk = _StubSDK(
+        error=anthropic.APIStatusError(
+            "This API key is not scoped to a workspace, so this request must "
+            "include the workspace with the ID of the workspace to use.",
+            response=httpx.Response(400, request=httpx.Request("POST", "https://x")),
+            body=None,
+        )
+    )
+
+    with pytest.raises(LLMError) as exc_info:
+        await _client(sdk).complete([LLMMessage.user("hi")])
+
+    assert "ANTHROPIC_WORKSPACE_ID" in exc_info.value.message
+    assert "scoped to a single workspace" in exc_info.value.message

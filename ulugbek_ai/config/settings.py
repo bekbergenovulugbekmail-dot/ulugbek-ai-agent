@@ -49,6 +49,10 @@ class Settings(BaseSettings):
 
     # --- Claude ------------------------------------------------------------ #
     anthropic_api_key: SecretStr | None = None
+    #: Required only for a key that spans several workspaces — such a key runs
+    #: in the workspace named by each request, so without this the API rejects
+    #: the call. A key scoped to a single workspace needs nothing here.
+    anthropic_workspace_id: str | None = None
     claude_model: str = "claude-opus-5"
     claude_max_tokens: Annotated[int, Field(ge=256, le=128_000)] = 16_000
     claude_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"

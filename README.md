@@ -265,7 +265,7 @@ committed.** Secrets are read from the environment only.
 
 | Variable | Description |
 |---|---|
-| `ANTHROPIC_API_KEY` | Claude API key. Without it the service still starts and serves every non-agent endpoint; `/api/agent/run` returns a clear configuration error. |
+| `ANTHROPIC_API_KEY` | Claude API key. Without it the service still starts and serves every non-agent endpoint; `/api/agent/run` returns a clear configuration error. If the key spans several workspaces, also set `ANTHROPIC_WORKSPACE_ID` — otherwise every request is rejected with a 400. |
 | `DATABASE_URL` | PostgreSQL URL. `postgres://` and `postgresql://` are upgraded to `postgresql+asyncpg://` automatically, so Railway's injected value works unchanged. |
 
 ### Application
@@ -293,6 +293,7 @@ committed.** Secrets are read from the environment only.
 
 | Variable | Default | Description |
 |---|---|---|
+| `ANTHROPIC_WORKSPACE_ID` | *(empty)* | Only for a key spanning several workspaces — such a key runs in the workspace each request names. A single-workspace key needs nothing here. |
 | `CLAUDE_MODEL` | `claude-opus-5` | Model id |
 | `CLAUDE_MAX_TOKENS` | `16000` | Output cap |
 | `CLAUDE_EFFORT` | `high` | `low` · `medium` · `high` · `xhigh` · `max` |
