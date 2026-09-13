@@ -159,6 +159,9 @@ cd frontend
 npm install
 cp .env.example .env.local        # NEXT_PUBLIC_API_BASE_URL -> your backend
 npm run dev                       # http://localhost:3000
+
+# Port 3000 already taken by something else? Pick another one:
+npm run dev -- -p 3001            # or: $env:PORT=3001; npm run dev   (PowerShell)
 ```
 
 **Stack:** Next.js 15 (App Router) · TypeScript (strict) · Tailwind CSS ·
