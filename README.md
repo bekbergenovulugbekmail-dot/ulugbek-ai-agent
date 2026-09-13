@@ -359,6 +359,10 @@ docker compose up --build
 Brings up PostgreSQL and the API, applies migrations, and serves
 <http://localhost:8000/docs>.
 
+Already running PostgreSQL on 5432? Set `POSTGRES_PORT=5433` in `.env` and use
+the same port in `DATABASE_URL` — the container still listens on 5432 inside
+the network, so nothing else changes.
+
 ### Without Docker
 
 ```bash

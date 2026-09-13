@@ -3,6 +3,9 @@
 # Usage:
 #   cp .env.example .env     # then set ANTHROPIC_API_KEY
 #   docker compose up --build
+#
+# Already running PostgreSQL on 5432? Set POSTGRES_PORT in .env (e.g. 5433) and
+# point DATABASE_URL at the same port — nothing else changes.
 
 services:
   postgres:
@@ -13,7 +16,8 @@ services:
       POSTGRES_PASSWORD: ulugbek
       POSTGRES_DB: ulugbek_ai
     ports:
-      - "5432:5432"
+      # Host port is overridable; the container always listens on 5432.
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
