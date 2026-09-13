@@ -371,6 +371,37 @@ alembic upgrade head
 python -m ulugbek_ai
 ```
 
+### If the database will not connect
+
+**Use `127.0.0.1`, not `localhost`, in `DATABASE_URL`.** On Windows `localhost`
+resolves to `::1` (IPv6) first while Docker Desktop publishes the port on IPv4.
+The TCP connection is accepted and immediately reset, and asyncpg reports it
+during the SSL handshake — so it reads like a TLS problem rather than a wrong
+address:
+
+```
+ConnectionResetError: [WinError 64] The specified network name is no longer available
+  ... in _create_ssl_connection
+```
+
+`[WinError 1225] connection refused` is the other half of the same story: there
+nothing is listening at all — the container is not up, or `DATABASE_URL` and
+`POSTGRES_PORT` disagree.
+
+Check the container is actually ready before migrating; `docker compose ps`
+should say `healthy`, not `starting`:
+
+```bash
+docker compose ps
+docker compose exec -T postgres pg_isready -U ulugbek -d ulugbek_ai
+```
+
+### Writing `.env` on Windows
+
+PowerShell's `>` and `Out-File` write **UTF-16**, which the settings loader
+cannot read. Use `Set-Content -Encoding Ascii` (or edit the file in an editor).
+A UTF-8 BOM and CRLF line endings are both fine.
+
 ---
 
 ## Database and migrations
