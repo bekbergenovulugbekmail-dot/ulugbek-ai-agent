@@ -353,6 +353,29 @@ you want `github_create_issue`.
 
 ## Local development
 
+### On Windows: one command
+
+`start.ps1` brings the whole stack up in the right order and stops at the first
+thing that is actually wrong, with the command that fixes it:
+
+```powershell
+.\start.ps1
+```
+
+It starts Docker Desktop if it is not running, waits for PostgreSQL to report
+healthy, applies migrations, launches the API and the Web Control Center in
+their own titled windows, waits until both answer a real request, and opens the
+browser. Anything already running is left alone, so re-running it after a crash
+restarts only the part that died. It reads no secret and prints none — only
+whether a key is configured.
+
+```powershell
+.\start.ps1 -FrontendPort 3005   # port 3001 is taken by something else
+.\start.ps1 -BackendPort 8010    # port 8000 is taken by something else
+.\start.ps1 -SkipMigrations      # schema is known current
+.\start.ps1 -NoBrowser           # do not open a browser
+```
+
 ### With Docker (recommended)
 
 ```bash
