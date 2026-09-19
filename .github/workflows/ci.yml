@@ -1,0 +1,177 @@
+# Tests on every push, and an automatic deploy when the default branch is green.
+#
+# The deploy is deliberately the *last* thing that happens and depends on the
+# backend suite passing: an automatic deploy that ships a red build is worse
+# than no automation at all.
+#
+# It stays dormant until two things exist in the repository settings, and says
+# so rather than failing:
+#   Secrets  -> RAILWAY_TOKEN    a Railway *project* token (Project Settings ->
+#                                Tokens). Project tokens are scoped to one
+#                                environment and can only deploy.
+#   Variables -> RAILWAY_SERVICE the service to deploy (name or id)
+#   Variables -> RAILWAY_HEALTHCHECK_URL   optional, e.g.
+#                                https://<your-app>.up.railway.app/api/health
+#                                When set, the run only passes once the
+#                                deployed service actually answers.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ulugbek
+          POSTGRES_PASSWORD: ulugbek
+          POSTGRES_DB: ulugbek_ai
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ulugbek -d ulugbek_ai"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # The real database, not SQLite: a migration that only works on SQLite
+      # would pass everywhere except production.
+      DATABASE_URL: postgresql+asyncpg://ulugbek:ulugbek@127.0.0.1:5432/ulugbek_ai
+      TEST_DATABASE_URL: postgresql+asyncpg://ulugbek:ulugbek@127.0.0.1:5432/ulugbek_ai
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # Migrations run before the tests, on a database no test has touched:
+      # the suite creates and drops the schema from the models directly, which
+      # would leave the version table pointing at tables that no longer exist.
+      - name: Migrations apply, roll back and reapply
+        run: |
+          python -m alembic upgrade head
+          python -m alembic downgrade base
+          python -m alembic upgrade head
+
+      - name: Schema matches the models
+        run: python -m alembic check
+
+      - name: Tests
+        run: python -m pytest -q
+
+      - name: Unused names and unreachable imports
+        run: |
+          pip install pyflakes
+          python -m pyflakes ulugbek_ai/ tests/ scripts/
+
+  frontend:
+    name: Web Control Center
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  deploy:
+    name: Deploy to Railway
+    # Only the backend gates the deploy: Railway builds the Dockerfile, which
+    # contains no frontend. A frontend failure is still a red build, just not
+    # a reason to hold back an API fix.
+    needs: [backend]
+    if: >-
+      github.event_name == 'push' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    # Names the deployment in the repository's Environments view, and is where
+    # a required reviewer can be added later to put a human back in the loop.
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the deploy is configured
+        id: guard
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+        run: |
+          if [ -z "${RAILWAY_TOKEN}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Deploy skipped::RAILWAY_TOKEN is not set. Add a Railway project token under Settings -> Secrets and variables -> Actions to turn automatic deploys on."
+          elif [ -z "${RAILWAY_SERVICE}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Deploy skipped::RAILWAY_SERVICE is not set. Add the service name or id as a repository variable."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install the Railway CLI
+        if: steps.guard.outputs.configured == 'true'
+        run: npm install -g @railway/cli@5
+
+      - name: Deploy
+        if: steps.guard.outputs.configured == 'true'
+        env:
+          # A project token authenticates the CLI without an interactive login.
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        # --ci streams the build log and exits when the build finishes, so a
+        # failed build fails this job instead of passing silently.
+        run: railway up --service "${{ vars.RAILWAY_SERVICE }}" --ci
+
+      # A finished build is not a running service. When the public URL is
+      # configured, the run only goes green once the deployment answers for
+      # itself — the same standard the agent's own deploy tool holds to.
+      - name: Wait for the deployment to answer
+        if: steps.guard.outputs.configured == 'true' && vars.RAILWAY_HEALTHCHECK_URL != ''
+        env:
+          URL: ${{ vars.RAILWAY_HEALTHCHECK_URL }}
+        run: |
+          for attempt in $(seq 1 30); do
+            status=$(curl -fsS --max-time 10 "$URL" -o /tmp/health.json -w '%{http_code}' || true)
+            if [ "$status" = "200" ] && grep -q '"status"[[:space:]]*:[[:space:]]*"ok"' /tmp/health.json; then
+              echo "Healthy after ${attempt} attempt(s):"
+              cat /tmp/health.json
+              exit 0
+            fi
+            echo "attempt ${attempt}: not healthy yet (HTTP ${status:-none})"
+            sleep 10
+          done
+          echo "::error title=Deployment did not become healthy::The build finished but $URL never reported status ok. The deploy is not confirmed live."
+          exit 1

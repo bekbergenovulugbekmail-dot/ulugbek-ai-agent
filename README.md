@@ -42,6 +42,7 @@ permission system, the API or the UI.
 - [Logging and audit](#logging-and-audit)
 - [Security](#security)
 - [Railway deployment](#railway-deployment)
+- [Continuous deployment](#continuous-deployment)
 - [Extending the agent](#extending-the-agent)
 
 ---
@@ -912,7 +913,53 @@ Every audit payload is redacted on the way in.
 4. Migrations run automatically on boot via `entrypoint.sh`
    (`alembic upgrade head`, then uvicorn). Set `RUN_MIGRATIONS=false` to run
    them as a separate release step instead.
-5. `PORT` and `WEB_CONCURRENCY` are honoured.
+5. Also set the Railway variables the agent itself needs to see Railway —
+   `RAILWAY_TOKEN`, `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`,
+   `RAILWAY_SERVICE_ID` — if you want the deployed agent to answer questions
+   about its own deployment.
+6. `PORT` and `WEB_CONCURRENCY` are honoured.
+
+---
+
+## Continuous deployment
+
+`.github/workflows/ci.yml` runs the suite on every push and deploys the default
+branch when it is green. It is dormant until it is configured, and says so in
+the run summary rather than failing.
+
+| Where | Name | Value |
+|---|---|---|
+| Secret | `RAILWAY_TOKEN` | A Railway **project** token (Project Settings → Tokens). Project tokens are scoped to one environment and can only deploy — an account token in CI would be far more than the job needs. |
+| Variable | `RAILWAY_SERVICE` | The service to deploy, by name or id. |
+| Variable | `RAILWAY_HEALTHCHECK_URL` | Optional: `https://<your-app>.up.railway.app/api/health` |
+
+Both live under **Settings → Secrets and variables → Actions**.
+
+What the pipeline actually enforces:
+
+- **Migrations run before the tests, on an untouched database.** The suite
+  creates and drops the schema from the models directly, so running it first
+  would leave the version table pointing at tables that no longer exist — a
+  false failure that costs an afternoon to understand.
+- **The tests run against PostgreSQL 16, not SQLite.** A migration that only
+  works on SQLite passes everywhere except production.
+- **The deploy needs the backend job.** Shipping a red build automatically is
+  worse than not automating at all.
+- **A finished build is not a running service.** With
+  `RAILWAY_HEALTHCHECK_URL` set, the run goes green only once the deployed
+  service answers `/api/health` with `status: ok` — the same standard
+  `railway_deploy` holds itself to. Without it, green means *built*.
+
+### Putting a human back in the loop
+
+The deploy job runs in the `production` GitHub environment. Adding a required
+reviewer to that environment under **Settings → Environments → production**
+makes every automatic deploy wait for an approval, without touching this file.
+
+Note that this is a different gate from the agent's. `railway_deploy` is
+`CRITICAL` and always asks, because *the agent* decided to deploy. This
+pipeline deploys because *you* pushed to the default branch, which is already a
+deliberate act.
 
 ---
 
