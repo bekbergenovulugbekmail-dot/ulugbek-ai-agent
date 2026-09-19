@@ -7,6 +7,7 @@ A live check against the real API lives in ``scripts/smoke_github.py``.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ulugbek_ai.config.settings import Settings
 from ulugbek_ai.core.enums import PermissionLevel
 from ulugbek_ai.core.errors import ValidationError
+from ulugbek_ai.core.utils import utcnow
 from ulugbek_ai.integrations.github.client import GitHubApiError, GitHubClient, parse_repository
 from ulugbek_ai.integrations.github.tools import (
     GitHubCommitsTool,
@@ -219,6 +221,50 @@ async def test_rate_limiting_says_what_to_do_about_it() -> None:
     assert "rate limit" in exc_info.value.message.lower()
     assert "GITHUB_TOKEN" in exc_info.value.message  # unauthenticated advice
     assert exc_info.value.retryable is True
+
+
+async def test_rate_limiting_names_the_wait_instead_of_inviting_a_retry() -> None:
+    """A rate limit is the one failure an immediate retry cannot fix.
+
+    Without the reset window in the message the model re-calls the same tool
+    until the run exhausts its iterations, which is what a real run did.
+    """
+    reset_at = int((utcnow() + timedelta(minutes=9, seconds=20)).timestamp())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {"message": "API rate limit exceeded"},
+            403,
+            headers={
+                "x-ratelimit-remaining": "0",
+                "x-ratelimit-limit": "60",
+                "x-ratelimit-reset": str(reset_at),
+            },
+        )
+
+    with pytest.raises(GitHubApiError) as exc_info:
+        await client_with(handler).get_repository("a/b")
+
+    message = exc_info.value.message
+    assert "9 minutes" in message
+    assert "UTC" in message
+    assert "0 of 60 requests left" in message
+    assert "again" in message.lower()  # tells the model not to re-call
+    assert exc_info.value.details["reset_at"] == reset_at
+
+
+async def test_rate_limit_message_survives_a_missing_reset_header() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {"message": "API rate limit exceeded"},
+            403,
+            headers={"x-ratelimit-remaining": "0"},
+        )
+
+    with pytest.raises(GitHubApiError) as exc_info:
+        await client_with(handler).get_repository("a/b")
+
+    assert "resets within the hour" in exc_info.value.message
 
 
 async def test_an_error_message_never_contains_the_token() -> None:

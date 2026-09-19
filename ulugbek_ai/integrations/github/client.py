@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Final
 
 import httpx
@@ -21,6 +22,7 @@ from pydantic import SecretStr
 
 from ulugbek_ai.core.errors import ToolError, ValidationError
 from ulugbek_ai.core.redaction import redact_text, truncate
+from ulugbek_ai.core.utils import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +99,25 @@ class RateLimit:
             remaining=as_int("x-ratelimit-remaining"),
             limit=as_int("x-ratelimit-limit"),
             reset_at=as_int("x-ratelimit-reset"),
+        )
+
+    def describe_reset(self) -> str:
+        """When the window reopens, in words the model can act on.
+
+        A rate limit is the one failure that retrying immediately cannot fix,
+        so the wait has to be part of the message: without it the model burns
+        its remaining iterations re-calling the same tool.
+        """
+        if self.reset_at is None:
+            return "The limit resets within the hour."
+        moment = datetime.fromtimestamp(self.reset_at, tz=timezone.utc)
+        minutes = max(0, round((moment - utcnow()).total_seconds() / 60))
+        if minutes <= 0:
+            return f"The limit resets at {moment:%H:%M} UTC, which is now."
+        unit = "minute" if minutes == 1 else "minutes"
+        return (
+            f"The limit resets at {moment:%H:%M} UTC, in about "
+            f"{minutes} {unit}."
         )
 
 
@@ -210,13 +231,18 @@ class GitHubClient:
         if status == 403:
             rate = self.last_rate_limit
             if rate and rate.remaining == 0:
+                budget = f" of {rate.limit}" if rate.limit else ""
+                remedy = (
+                    "Set GITHUB_TOKEN in the environment to raise the limit "
+                    "from 60 to 5000 requests an hour."
+                    if not self.authenticated
+                    else "Every GitHub tool shares this budget."
+                )
                 return GitHubApiError(
-                    "GitHub rate limit reached. "
-                    + (
-                        "Set GITHUB_TOKEN to raise the limit."
-                        if not self.authenticated
-                        else "Wait for the window to reset."
-                    ),
+                    f"GitHub rate limit reached: 0{budget} requests left. "
+                    f"{rate.describe_reset()} Retrying before then will fail "
+                    f"again, so report this rather than calling GitHub again. "
+                    f"{remedy}",
                     status=status,
                     retryable=True,
                     details={"reset_at": rate.reset_at},
