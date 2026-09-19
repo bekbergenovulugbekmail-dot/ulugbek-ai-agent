@@ -42,8 +42,17 @@ async def session_dependency() -> AsyncIterator[AsyncSession]:
         yield session
 
 
-def settings_dependency() -> Settings:
-    return get_settings()
+def settings_dependency(request: Request) -> Settings:
+    """The settings this application was built with.
+
+    ``create_app`` takes a settings object and stores it on the app, so reading
+    the process-wide singleton here would let an endpoint report a
+    configuration the application is not actually running — health being the
+    one that matters, since it is what a deployment is judged by. The singleton
+    remains the fallback for a request served outside a configured app.
+    """
+    configured: Settings | None = getattr(request.app.state, "settings", None)
+    return configured or get_settings()
 
 
 def llm_dependency(request: Request) -> LLMClient:

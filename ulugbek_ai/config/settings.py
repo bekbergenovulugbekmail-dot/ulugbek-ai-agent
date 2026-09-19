@@ -8,7 +8,7 @@ accidental ``repr()`` of the settings object cannot leak it.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -107,6 +107,33 @@ class Settings(BaseSettings):
     permission_critical: PermissionMode = PermissionMode.APPROVAL
 
     # ---------------------------------------------------------------- helpers #
+    @field_validator(
+        "anthropic_api_key",
+        "github_token",
+        "railway_token",
+        mode="before",
+    )
+    @classmethod
+    def _blank_secret_is_absent(cls, value: Any) -> Any:
+        """A blank variable means unset — not "a credential that is empty".
+
+        Hosting platforms make this the common case rather than the edge one:
+        a variable is created in the dashboard and its value pasted later, and
+        every deployment template ships ``KEY=`` placeholders. Treating blank
+        as a real value turns a missing credential into a crash during startup,
+        or into a request that authenticates with an empty bearer token —
+        instead of the "not configured" state every consumer already handles
+        and reports.
+
+        Surrounding whitespace is stripped for the same reason: no credential
+        has meaningful leading or trailing space, but a value pasted with a
+        newline is otherwise rejected by the provider with a message about the
+        key being invalid.
+        """
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
     @field_validator("database_url")
     @classmethod
     def _normalize_database_url(cls, value: str) -> str:
