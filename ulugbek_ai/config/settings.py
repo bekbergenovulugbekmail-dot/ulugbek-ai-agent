@@ -67,6 +67,24 @@ class Settings(BaseSettings):
     github_api_url: str = "https://api.github.com"
     github_timeout_seconds: Annotated[float, Field(gt=0)] = 20.0
 
+    # --- Railway integration ----------------------------------------------- #
+    #: An account, workspace or project token. Read from the environment only;
+    #: never written to a log, an audit row or an API response.
+    railway_token: SecretStr | None = None
+    #: Project tokens authenticate with their own header rather than a bearer,
+    #: so the kind has to be declared — the two are not interchangeable.
+    railway_token_kind: Literal["account", "project"] = "account"
+    railway_api_url: str = "https://backboard.railway.com/graphql/v2"
+    railway_timeout_seconds: Annotated[float, Field(gt=0)] = 30.0
+    #: Default ids, so a command does not have to repeat them. A project's own
+    #: Railway binding overrides these; an explicit argument overrides both.
+    railway_project_id: str | None = None
+    railway_environment_id: str | None = None
+    railway_service_id: str | None = None
+    #: How long a deploy waits for Railway to reach a terminal status before
+    #: reporting what it saw. Longer than this is reported as still running.
+    railway_deploy_wait_seconds: Annotated[float, Field(ge=0, le=300)] = 90.0
+
     # --- Agent loop -------------------------------------------------------- #
     agent_max_iterations: Annotated[int, Field(ge=1, le=100)] = 12
     agent_max_replans: Annotated[int, Field(ge=0, le=20)] = 2

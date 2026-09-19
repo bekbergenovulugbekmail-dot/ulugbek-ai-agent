@@ -23,6 +23,31 @@ describe("ApprovalCard", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows the tool's own account of the call, not only the policy rule", () => {
+    // A deploy's target comes from configuration, so the arguments can be
+    // empty — the sentence is the only thing describing what is at stake.
+    render(
+      <ApprovalCard
+        approval={makeApproval({
+          tool_name: "railway_deploy",
+          tool_arguments: {},
+          reason:
+            "Deploy the service 'api' to the 'production' environment of " +
+            "project 'ulugbek-ai' on Railway. This replaces what is currently " +
+            "running there and is visible to real users as soon as the build " +
+            "finishes.\n\nCRITICAL actions require explicit human approval.",
+        })}
+      />,
+    );
+
+    expect(screen.getByText(/'production' environment/)).toBeInTheDocument();
+    expect(screen.getByText(/visible to real users/)).toBeInTheDocument();
+    expect(screen.getByText("CRITICAL")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /approve/i }),
+    ).toBeInTheDocument();
+  });
+
   it("never renders a raw credential — the backend redacted it first", () => {
     render(
       <ApprovalCard

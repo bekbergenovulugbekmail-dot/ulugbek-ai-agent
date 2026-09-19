@@ -34,11 +34,11 @@ from ulugbek_ai.core.errors import (
     ToolInputError,
     ToolNotFoundError,
 )
-from ulugbek_ai.core.redaction import redact, truncate
+from ulugbek_ai.core.redaction import redact, redact_text, truncate
 from ulugbek_ai.core.utils import utcnow
 from ulugbek_ai.llm.base import ContentBlock, LLMToolCall
 from ulugbek_ai.observability.audit import AuditLogger
-from ulugbek_ai.tools.base import ToolContext, ToolResult, ToolVerification
+from ulugbek_ai.tools.base import Tool, ToolContext, ToolResult, ToolVerification
 from ulugbek_ai.tools.models import ToolExecution
 from ulugbek_ai.tools.registry import ToolRegistry
 
@@ -219,7 +219,11 @@ class Executor:
                 )
 
             approval = await self._request_approval(
-                run, call, tool.permission, reason=exc.message, goal=goal
+                run,
+                call,
+                tool.permission,
+                reason=await self._approval_reason(tool, call, context, exc.message),
+                goal=goal,
             )
             await self._audit.approval(
                 f"Approval required for {call.name}",
@@ -300,6 +304,32 @@ class Executor:
             if approval.tool_call_id == call_id:
                 return ApprovalStatus(approval.status)
         return None
+
+    async def _approval_reason(
+        self,
+        tool: Tool,
+        call: LLMToolCall,
+        context: ToolContext,
+        policy_message: str,
+    ) -> str:
+        """The policy's reason, led by the tool's own account of the call.
+
+        A person approving a gated action needs to know what it does to the
+        world, not only which rule stopped it.
+        """
+        try:
+            summary = await tool.summarize(call.arguments, context)
+        except Exception:  # noqa: BLE001 - never block an approval over this
+            logger.warning(
+                "summarize() failed for %s; falling back to the policy reason",
+                call.name,
+                exc_info=True,
+            )
+            summary = None
+
+        if not summary:
+            return policy_message
+        return f"{redact_text(summary.strip())}\n\n{policy_message}"
 
     async def _request_approval(
         self,

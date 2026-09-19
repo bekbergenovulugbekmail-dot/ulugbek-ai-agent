@@ -35,6 +35,7 @@ permission system, the API or the UI.
 - [Memory](#memory)
 - [Tools](#tools)
 - [GitHub integration](#github-integration)
+- [Railway integration](#railway-integration)
 - [Permissions](#permissions)
 - [Approvals](#approvals)
 - [Verification](#verification)
@@ -645,6 +646,16 @@ And the GitHub integration:
 | `github_list_pull_requests` | READ | Open / closed pull requests |
 | `github_create_issue` | **EXECUTE** | Open an issue — requires approval, and verifies by reading the issue back |
 
+And the Railway integration:
+
+| Tool | Permission | Description |
+|---|---|---|
+| `railway_list_projects` | READ | Projects this token can see, with their ids |
+| `railway_project_info` | READ | A project's services and environments, with ids |
+| `railway_deployments` | READ | Recent deployments and their real status |
+| `railway_deployment_logs` | READ | Log tail of one deployment, secrets masked |
+| `railway_deploy` | **CRITICAL** | Deploy a service — always requires approval, waits for the outcome, and verifies against Railway's own status |
+
 ---
 
 ## GitHub integration
@@ -698,6 +709,96 @@ python -m scripts.smoke_claude "Check my projects"   # real model, one full run
 ```
 
 `smoke_github` only runs the READ tools, so it can never change a repository.
+
+---
+
+## Railway integration
+
+```
+ulugbek_ai/integrations/railway/
+├── client.py   the GraphQL client — the only place the token exists
+└── tools.py    four read tools and one that deploys
+```
+
+Railway's API is GraphQL, which changes one thing that matters: **errors come
+back with HTTP 200**, inside an `errors` array. A client that checks only the
+status code reports a refused deploy as a success. This one checks the body,
+and there is a test that sends a GraphQL error with a 200 and asserts it is
+still treated as a failure.
+
+Account, workspace and OAuth tokens authenticate with `Authorization: Bearer`;
+a **project token uses its own header** and must not be sent as a bearer, so
+`RAILWAY_TOKEN_KIND` declares which kind you have. A rejected credential says
+which kind to try instead.
+
+### Deploying always asks
+
+`railway_deploy` is `CRITICAL` — the one level [the permission
+policy](#permissions) will not let a configuration make automatic. Setting
+`PERMISSION_CRITICAL=auto` does not make deploys automatic; it is corrected to
+`approval` on construction. The gate is enforced in the executor, before the
+tool runs: there is a test that approves a deploy and asserts the deploy
+mutation was never sent to Railway beforehand, and another that rejects one and
+asserts the same.
+
+The approval card names what is about to happen:
+
+> Deploy the service `'api'` to the `'production'` environment of project
+> `'ulugbek-ai'` on Railway. This replaces what is currently running there and
+> is visible to real users as soon as the build finishes.
+
+That sentence comes from the tool itself, through `Tool.summarize()` — a hook
+any tool can implement. Without it the card would show the word CRITICAL
+against an empty argument list, because a deploy's target usually comes from
+configuration rather than from the model.
+
+### Triggering is not deploying
+
+The deploy mutation returns as soon as Railway accepts the request, long before
+anything is live. So `railway_deploy` waits for a terminal status and reports
+what it actually saw:
+
+| What Railway says | What the tool reports |
+|---|---|
+| `SUCCESS` | `live: true`, with the URL |
+| `FAILED` / `CRASHED` | `live: false`, and to read the deployment logs |
+| still building at the deadline | `live: false`, "still building — not confirmed live", and where to check |
+| a status this client does not know | `unknown` — reported verbatim, never as success |
+
+`verify()` then asks Railway again, independently of the trigger. It returns
+success only when the deployment is live, failure when Railway says it failed
+or when the trigger produced no deployment at all, and neither while a build is
+still running — claiming success there is the exact failure this system exists
+to prevent.
+
+### The target comes from the project
+
+Addressing a service needs three ids. Bind them once:
+
+```json
+{ "railway": {
+    "project_id": "...", "environment_id": "...", "service_id": "..." } }
+```
+
+or set `RAILWAY_PROJECT_ID` / `RAILWAY_ENVIRONMENT_ID` / `RAILWAY_SERVICE_ID`.
+An explicit argument beats the binding, which beats the defaults. When one is
+missing the error names *which* one and which tool finds it, rather than
+saying "invalid input".
+
+### Logs are redacted at the source
+
+Build output echoes environment variables as a matter of course, which makes
+deployment logs the largest leak surface in the application. Every log line is
+redacted and truncated inside `client.py`, before the text exists anywhere the
+rest of the system can see it.
+
+### Checking it works
+
+```bash
+python -m scripts.smoke_railway            # real API, read-only
+```
+
+`smoke_railway` never deploys: it runs the READ tools only.
 `smoke_claude` needs `ANTHROPIC_API_KEY` and costs a few cents.
 
 ---

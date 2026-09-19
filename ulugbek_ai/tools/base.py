@@ -10,6 +10,8 @@ Contract for every tool, present and future:
   a failed :class:`ToolResult`.
 * ``verify`` — optional post-condition check, so a tool can prove it worked
   rather than being assumed successful.
+* ``summarize`` — optional plain-language description of one pending call,
+  shown to the human who has to approve it.
 """
 
 from __future__ import annotations
@@ -154,6 +156,23 @@ class Tool(ABC):
         Arguments have already been validated against ``input_schema`` and the
         permission check has already passed.
         """
+
+    async def summarize(
+        self, arguments: dict[str, Any], context: ToolContext
+    ) -> str | None:
+        """One sentence naming what this call will actually do.
+
+        Shown on the approval card, ahead of the policy's own reason. Arguments
+        alone are often not enough to judge a gated action: a deploy whose
+        target comes entirely from configuration has no arguments at all, and
+        "approve railway_deploy {}" asks a person to authorise something the
+        screen does not describe.
+
+        Called before the tool runs, and only when an approval is being
+        requested. Returning ``None`` leaves the card as it was. It must not
+        raise — a summary is never worth blocking an approval over.
+        """
+        return None
 
     async def verify(
         self,

@@ -254,14 +254,30 @@ def build_default_registry(
 def _integration_tools(settings: "Settings") -> list[Tool]:
     """Tools for every integration this configuration enables.
 
-    GitHub is registered unconditionally: the read tools work against public
-    repositories without a token, and a missing token produces a clear message
-    at call time rather than a silently absent capability.
+    Both integrations are registered unconditionally. GitHub's read tools work
+    against public repositories without a token at all; Railway's need one for
+    everything, but registering it anyway means a missing token produces a
+    clear message at call time rather than a silently absent capability — the
+    agent can say "Railway is not configured" instead of behaving as though
+    deploying were impossible.
     """
     from ulugbek_ai.integrations.github import github_tools
+    from ulugbek_ai.integrations.railway import railway_tools
 
-    return github_tools(
-        token=settings.github_token,
-        api_url=settings.github_api_url,
-        timeout_seconds=settings.github_timeout_seconds,
-    )
+    return [
+        *github_tools(
+            token=settings.github_token,
+            api_url=settings.github_api_url,
+            timeout_seconds=settings.github_timeout_seconds,
+        ),
+        *railway_tools(
+            token=settings.railway_token,
+            token_kind=settings.railway_token_kind,
+            api_url=settings.railway_api_url,
+            timeout_seconds=settings.railway_timeout_seconds,
+            project_id=settings.railway_project_id,
+            environment_id=settings.railway_environment_id,
+            service_id=settings.railway_service_id,
+            deploy_wait_seconds=settings.railway_deploy_wait_seconds,
+        ),
+    ]

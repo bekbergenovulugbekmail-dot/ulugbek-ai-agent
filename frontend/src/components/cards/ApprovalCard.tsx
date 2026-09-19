@@ -88,7 +88,10 @@ export function ApprovalCard({
           </div>
         </div>
 
-        <p className="text-sm leading-relaxed text-ink-muted">
+        {/* A tool's own description of the call comes first, then the
+            policy's reason, separated by a blank line — which only survives
+            if the whitespace does. */}
+        <p className="whitespace-pre-line text-sm leading-relaxed text-ink-muted">
           {approval.reason}
         </p>
 
