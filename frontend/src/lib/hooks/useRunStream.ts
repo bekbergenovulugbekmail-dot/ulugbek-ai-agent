@@ -9,9 +9,15 @@
  * WebSocket later touches only this file.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { agentApi, type AgentEvent, type AgentStateSnapshot } from "@/lib/api";
+import {
+  agentApi,
+  isTerminalRunStatus,
+  type AgentEvent,
+  type AgentStateSnapshot,
+  type RunStatus,
+} from "@/lib/api";
 
 export type StreamTransport = "sse" | "polling" | "idle";
 
@@ -19,6 +25,7 @@ export interface RunStream {
   events: AgentEvent[];
   state: AgentStateSnapshot | undefined;
   transport: StreamTransport;
+  /** The run reached a terminal status. A run paused for approval has not. */
   finished: boolean;
   error: string | undefined;
 }
@@ -40,16 +47,23 @@ export function useRunStream(runId: string | null | undefined): RunStream {
 
   const cursorRef = useRef(0);
 
-  const reset = useCallback(() => {
+  // Which run the state above describes. Resetting in an effect would be too
+  // late: the commit that first carries the new id still exposes the previous
+  // run's `finished`, and a consumer acting on it attributes the old run's
+  // outcome to the new one. Adjusting during render closes that window.
+  const watched = runId ?? null;
+  const [described, setDescribed] = useState<string | null>(watched);
+  if (described !== watched) {
+    setDescribed(watched);
     cursorRef.current = 0;
     setEvents([]);
     setState(undefined);
     setFinished(false);
     setError(undefined);
-  }, []);
+    setTransport("idle");
+  }
 
   useEffect(() => {
-    reset();
     if (!runId) {
       setTransport("idle");
       return;
@@ -74,7 +88,8 @@ export function useRunStream(runId: string | null | undefined): RunStream {
           page.events.forEach(applyEvent);
           const snapshot = await agentApi.state(runId);
           setState(snapshot);
-          if (!snapshot.busy && snapshot.run_status !== "RUNNING") {
+          // A paused run keeps polling: approving it resumes the timeline.
+          if (isTerminalRunStatus(snapshot.run_status)) {
             setFinished(true);
             if (pollTimer) clearInterval(pollTimer);
           }
@@ -113,9 +128,22 @@ export function useRunStream(runId: string | null | undefined): RunStream {
       }
     });
 
-    source.addEventListener("done", () => {
-      setFinished(true);
+    source.addEventListener("done", (message) => {
       source?.close();
+      // The stream closes on any non-running status, approval pauses included,
+      // so the payload decides whether the run is actually over.
+      let status: RunStatus | undefined;
+      try {
+        status = (JSON.parse((message as MessageEvent).data) as { status?: RunStatus })
+          .status;
+      } catch {
+        /* an unreadable frame falls through to the status check below */
+      }
+      if (status !== undefined && !isTerminalRunStatus(status)) {
+        startPolling();
+        return;
+      }
+      setFinished(true);
     });
 
     source.addEventListener("error", () => {
@@ -130,7 +158,7 @@ export function useRunStream(runId: string | null | undefined): RunStream {
       source?.close();
       if (pollTimer) clearInterval(pollTimer);
     };
-  }, [runId, reset]);
+  }, [runId]);
 
   return { events, state, transport, finished, error };
 }

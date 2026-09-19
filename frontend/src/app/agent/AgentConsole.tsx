@@ -27,6 +27,7 @@ import {
   ApiError,
   agentApi,
   approvalApi,
+  isTerminalRunStatus,
   projectApi,
   toolApi,
   type AgentStateSnapshot,
@@ -136,6 +137,12 @@ export function AgentConsole() {
     void (async () => {
       try {
         const run = await agentApi.getRun(runId);
+        if (!isTerminalRunStatus(run.status)) {
+          // Still working, or paused for an approval. Releasing the guard lets
+          // the real answer land when the run actually settles.
+          answered.current.delete(runId);
+          return;
+        }
         setEntries((current) => [
           ...current,
           {
@@ -144,12 +151,15 @@ export function AgentConsole() {
             text:
               run.output ??
               run.error ??
-              "The run finished without producing an answer.",
+              (run.status === "CANCELLED"
+                ? "The run was cancelled."
+                : "The run finished without producing an answer."),
             timestamp: run.finished_at ?? new Date().toISOString(),
             failed: run.status === "FAILED",
           },
         ]);
       } catch {
+        answered.current.delete(runId);
         /* the timeline still shows what happened */
       }
     })();

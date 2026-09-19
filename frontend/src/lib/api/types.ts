@@ -12,6 +12,21 @@ export type RunStatus =
   | "FAILED"
   | "CANCELLED";
 
+/**
+ * Statuses a run never leaves. `WAITING_APPROVAL` is deliberately absent: the
+ * run has stopped, but it has not finished, and treating the two alike makes
+ * the UI report a paused run as one that produced nothing.
+ */
+export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = [
+  "COMPLETED",
+  "FAILED",
+  "CANCELLED",
+];
+
+export function isTerminalRunStatus(status: RunStatus | null | undefined): boolean {
+  return status != null && TERMINAL_RUN_STATUSES.includes(status);
+}
+
 export type TaskStatus =
   | "PENDING"
   | "PLANNING"

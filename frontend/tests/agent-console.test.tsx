@@ -192,6 +192,110 @@ describe("AgentConsole", () => {
     expect(screen.getByText("Telegram loyihamni tekshir")).toBeInTheDocument();
   });
 
+  it("does not attribute a finished run's outcome to the next one", async () => {
+    // The regression: starting a second run in the same session showed the
+    // previous run's terminal state against the new run, which had not
+    // produced anything yet — "the run finished without producing an answer",
+    // one second after sending, while the tools were still running.
+    const SECOND_RUN = "55555555-5555-5555-5555-555555555555";
+    searchParams.current = new URLSearchParams({ run: RUN_ID });
+
+    vi.spyOn(agentApi, "getRun").mockImplementation(async (id) =>
+      id === RUN_ID
+        ? {
+            id: RUN_ID,
+            input: "Birinchi buyruq",
+            status: "COMPLETED",
+            output: "Birinchi javob.",
+            error: null,
+            iterations: 2,
+            replans: 0,
+            model: "claude-opus-5",
+            token_usage: {},
+            task_id: null,
+            project_id: null,
+            user_id: null,
+            started_at: new Date().toISOString(),
+            finished_at: new Date().toISOString(),
+            created_at: new Date().toISOString(),
+            steps: [],
+          }
+        : {
+            id: SECOND_RUN,
+            input: "Ikkinchi buyruq",
+            status: "RUNNING",
+            output: null,
+            error: null,
+            iterations: 0,
+            replans: 0,
+            model: "claude-opus-5",
+            token_usage: {},
+            task_id: null,
+            project_id: null,
+            user_id: null,
+            started_at: new Date().toISOString(),
+            finished_at: null,
+            created_at: new Date().toISOString(),
+            steps: [],
+          },
+    );
+    const stateSpy = vi.spyOn(agentApi, "state").mockImplementation(async (id) =>
+      id === SECOND_RUN
+        ? makeState({
+            phase: "USING_TOOL",
+            label: "Using a tool",
+            busy: true,
+            run_id: SECOND_RUN,
+            run_status: "RUNNING",
+          })
+        : makeState({
+            phase: "COMPLETED",
+            label: "Completed",
+            busy: false,
+            run_id: RUN_ID,
+            run_status: "COMPLETED",
+          }),
+    );
+    vi.spyOn(agentApi, "start").mockResolvedValue({
+      run_id: SECOND_RUN,
+      task_id: null,
+      project_id: null,
+      status: "RUNNING",
+      task_status: "RUNNING",
+      output: null,
+      error: null,
+      iterations: 0,
+      replans: 0,
+      tools_used: [],
+      verification: null,
+      approval: null,
+      token_usage: {},
+    });
+
+    const user = userEvent.setup();
+    render(<AgentConsole />);
+    expect(await screen.findByText("Birinchi javob.")).toBeInTheDocument();
+
+    await user.type(
+      screen.getByLabelText("Command for the agent"),
+      "Ikkinchi buyruq",
+    );
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    // The console has switched to the new run and polled its state...
+    await waitFor(() =>
+      expect(stateSpy.mock.calls.some(([id]) => id === SECOND_RUN)).toBe(true),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("agent-phase")).toHaveTextContent("USING TOOL"),
+    );
+
+    // ...and has said nothing about a run that is still working.
+    expect(
+      screen.queryByText(/finished without producing an answer/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows an approval inline when the run pauses for one", async () => {
     searchParams.current = new URLSearchParams({ run: RUN_ID });
     vi.spyOn(agentApi, "getRun").mockResolvedValue({
