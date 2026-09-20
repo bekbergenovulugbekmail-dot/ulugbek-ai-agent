@@ -1,4 +1,7 @@
 node_modules
 .next
+# Never bake a local environment file into a layer, even one the runtime stage
+# does not copy forward.
+.env
 .env*.local
 npm-debug.log*

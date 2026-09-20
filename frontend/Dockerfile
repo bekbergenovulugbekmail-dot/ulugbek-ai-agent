@@ -3,6 +3,11 @@
 # --- Build stage ------------------------------------------------------------ #
 FROM node:22-alpine AS builder
 
+# Alpine has no glibc. Next's toolchain loads native modules through
+# process.dlopen, which needs these shims — the documented Alpine requirement
+# in Next's own Docker example. Missing, it fails the build, not the run.
+RUN apk add --no-cache libc6-compat
+
 WORKDIR /app
 
 COPY package.json package-lock.json ./
@@ -41,8 +46,10 @@ WORKDIR /app
 RUN addgroup --system --gid 10001 nodejs \
     && adduser --system --uid 10001 --ingroup nodejs nextjs
 
-# `standalone` carries its own minimal node_modules and server.js; the static
-# assets and the public folder are the two things it does not copy itself.
+# `standalone` carries its own minimal node_modules, server.js and the
+# compiled app under .next/server. The hashed browser assets are the one thing
+# it does not copy, so they come across separately. (This project has no
+# public/ directory; add a third COPY for it if one is ever introduced.)
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
