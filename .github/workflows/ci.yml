@@ -110,20 +110,19 @@ jobs:
       - run: npm run build
 
   deploy:
-    name: Deploy to Railway
-    # Only the backend gates the deploy: Railway builds the Dockerfile, which
-    # contains no frontend. A frontend failure is still a red build, just not
-    # a reason to hold back an API fix.
-    needs: [backend]
-    if: >-
-      github.event_name == 'push' &&
-      github.ref_name == github.event.repository.default_branch
-    runs-on: ubuntu-latest
-    # Names the deployment in the repository's Environments view, and is where
-    # a required reviewer can be added later to put a human back in the loop.
-    environment: production
+  name: Deploy to Railway
 
-    steps:
+  needs: [backend]
+
+  if: >-
+    github.event_name == 'workflow_dispatch' ||
+    (github.event_name == 'push' &&
+     github.ref == github.event.repository.default_branch)
+
+  runs-on: ubuntu-latest
+
+  environment: production
+        steps:
       - uses: actions/checkout@v5
 
       - name: Check the deploy is configured
