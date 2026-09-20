@@ -154,3 +154,19 @@ describe("Approvals page", () => {
     expect(await screen.findByText("Nothing waiting on you")).toBeInTheDocument();
   });
 });
+
+describe("the deployment health route", () => {
+  it("answers the exact shape the platform and CI look for", async () => {
+    // Railway's healthcheckPath and the pipeline's wait loop both match on
+    // `"status": "ok"`. Changing this shape silently breaks a deploy gate.
+    const { GET } = await import("@/app/healthz/route");
+
+    const response = GET();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      status: "ok",
+      service: "web",
+    });
+  });
+});

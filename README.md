@@ -950,6 +950,46 @@ What the pipeline actually enforces:
   service answers `/api/health` with `status: ok` — the same standard
   `railway_deploy` holds itself to. Without it, green means *built*.
 
+### The Web Control Center is a second service
+
+The API and the console deploy independently, from one repository:
+
+| Service | Root | Build | Health |
+|---|---|---|---|
+| API | `/` | `Dockerfile` | `/api/health` |
+| Web | `/frontend` | `frontend/Dockerfile` | `/healthz` |
+
+Set the web service's **root directory to `frontend`** in Railway, and give it
+one variable:
+
+```
+NEXT_PUBLIC_API_BASE_URL=https://<your-api>.up.railway.app/api
+```
+
+That variable is read **during the image build**, not at runtime: Next compiles
+every `NEXT_PUBLIC_*` value into the browser bundle, so a value supplied to a
+running container is ignored. Railway exposes service variables to the build,
+and `frontend/Dockerfile` declares it as an `ARG`. Building without it fails
+loudly rather than producing a console that quietly calls `localhost`.
+
+The browser then talks to the API cross-origin, so the API's `CORS_ORIGINS`
+must include the web service's URL:
+
+```
+CORS_ORIGINS=["https://<your-web>.up.railway.app"]
+```
+
+Then add the pipeline's two settings, next to the API's:
+
+| Where | Name | Value |
+|---|---|---|
+| Variable | `RAILWAY_SERVICE_WEB` | The web service, by name or id |
+| Variable | `RAILWAY_WEB_HEALTHCHECK_URL` | `https://<your-web>.up.railway.app/healthz` |
+
+`/healthz` is deliberately separate from the dashboard: `/` renders panels
+whose data comes from the API, so using it as the health check would make the
+web service look unhealthy whenever the *backend* was down.
+
 ### Putting a human back in the loop
 
 The deploy job runs in the `production` GitHub environment. Adding a required

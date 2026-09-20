@@ -9,11 +9,20 @@
 #   Secrets  -> RAILWAY_TOKEN    a Railway *project* token (Project Settings ->
 #                                Tokens). Project tokens are scoped to one
 #                                environment and can only deploy.
-#   Variables -> RAILWAY_SERVICE the service to deploy (name or id)
+#   Variables -> RAILWAY_SERVICE the API service to deploy (name or id)
 #   Variables -> RAILWAY_HEALTHCHECK_URL   optional, e.g.
 #                                https://<your-app>.up.railway.app/api/health
 #                                When set, the run only passes once the
 #                                deployed service actually answers.
+#
+# The Web Control Center is a second Railway service, deployed by its own job:
+#   Variables -> RAILWAY_SERVICE_WEB           the web service (name or id)
+#   Variables -> RAILWAY_WEB_HEALTHCHECK_URL   optional, e.g.
+#                                https://<your-web>.up.railway.app/healthz
+#
+# Note that the web service reads NEXT_PUBLIC_API_BASE_URL from its *Railway*
+# variables, not from here: Next compiles that value into the browser bundle
+# during the image build, so it has to exist where the build happens.
 
 name: CI
 
@@ -183,4 +192,69 @@ jobs:
             sleep 10
           done
           echo "::error title=Deployment did not become healthy::The build finished but $URL never reported status ok. The deploy is not confirmed live."
+          exit 1
+
+  deploy-web:
+    name: Deploy the Web Control Center to Railway
+    # Gated on the frontend suite only: this is a separate Railway service, so
+    # a backend failure is no reason to hold back a console fix.
+    needs: [frontend]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       github.ref_name == github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment: production
+
+    defaults:
+      run:
+        # `railway up` uploads the working directory, and the web service is
+        # built from frontend/Dockerfile with frontend/railway.json beside it.
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the deploy is configured
+        id: guard
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE_WEB: ${{ vars.RAILWAY_SERVICE_WEB }}
+        run: |
+          if [ -z "${RAILWAY_TOKEN}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Web deploy skipped::RAILWAY_TOKEN is not set."
+          elif [ -z "${RAILWAY_SERVICE_WEB}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Web deploy skipped::RAILWAY_SERVICE_WEB is not set. Add the web service name or id as a repository variable."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install the Railway CLI
+        if: steps.guard.outputs.configured == 'true'
+        run: npm install -g @railway/cli@5
+
+      - name: Deploy
+        if: steps.guard.outputs.configured == 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --service "${{ vars.RAILWAY_SERVICE_WEB }}" --ci
+
+      - name: Wait for the deployment to answer
+        if: steps.guard.outputs.configured == 'true' && vars.RAILWAY_WEB_HEALTHCHECK_URL != ''
+        env:
+          URL: ${{ vars.RAILWAY_WEB_HEALTHCHECK_URL }}
+        run: |
+          for attempt in $(seq 1 30); do
+            status=$(curl -fsS --max-time 10 "$URL" -o /tmp/health.json -w '%{http_code}' || true)
+            if [ "$status" = "200" ] && grep -q '"status"[[:space:]]*:[[:space:]]*"ok"' /tmp/health.json; then
+              echo "Healthy after ${attempt} attempt(s):"
+              cat /tmp/health.json
+              exit 0
+            fi
+            echo "attempt ${attempt}: not healthy yet (HTTP ${status:-none})"
+            sleep 10
+          done
+          echo "::error title=Web deployment did not become healthy::The build finished but $URL never reported status ok. The deploy is not confirmed live."
           exit 1
