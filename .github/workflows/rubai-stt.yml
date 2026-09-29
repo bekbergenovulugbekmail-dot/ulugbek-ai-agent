@@ -38,7 +38,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install
-        run: pip install -r requirements.txt pytest
+        # pytest-asyncio explicitly: the service's tests do not inherit the
+        # repository root's configuration, and should not.
+        run: pip install -r requirements.txt pytest pytest-asyncio
 
       # No model, no ffmpeg, seconds to run: the guard in front of the model is
       # what these cover, and it is the part that changes.
