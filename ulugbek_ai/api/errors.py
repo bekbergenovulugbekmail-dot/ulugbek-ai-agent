@@ -25,7 +25,11 @@ async def ulugbek_error_handler(
         logger.error("%s on %s: %s", exc.code, request.url.path, exc.message)
     else:
         logger.info("%s on %s: %s", exc.code, request.url.path, exc.message)
-    return JSONResponse(status_code=exc.http_status, content={"error": exc.to_dict()})
+    return JSONResponse(
+        status_code=exc.http_status,
+        content={"error": exc.to_dict()},
+        headers=exc.headers,
+    )
 
 
 async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:

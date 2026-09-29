@@ -85,12 +85,29 @@ let authTokenProvider: TokenProvider = () => null;
 /**
  * Register how requests get their credential.
  *
- * Nothing calls this yet — the backend's auth seam is still open — but every
- * request already routes through it, so switching authentication on is a
- * one-line change rather than a sweep through the codebase.
+ * `installOperatorToken()` in `@/lib/auth` is what calls this. The indirection
+ * earns its place by keeping this module free of any opinion about where a
+ * token is kept — it is equally happy with a browser store, a cookie or a
+ * session exchanged with the server.
  */
 export function setAuthTokenProvider(provider: TokenProvider): void {
   authTokenProvider = provider;
+}
+
+type UnauthorizedHandler = () => void;
+
+let onUnauthorized: UnauthorizedHandler = () => {};
+
+/**
+ * Called whenever the server answers 401.
+ *
+ * A credential the server has stopped accepting — rotated, mistyped, expired —
+ * is worse than none: every panel fails with its own error and none of them
+ * says the token is the problem. One handler, registered here, lets the app
+ * discard it and ask again.
+ */
+export function setUnauthorizedHandler(handler: UnauthorizedHandler): void {
+  onUnauthorized = handler;
 }
 
 export interface RequestOptions {
@@ -195,6 +212,10 @@ export async function request<T>(
   }
   clearTimeout(timer);
 
+  if (response.status === 401) {
+    onUnauthorized();
+    throw await parseError(response);
+  }
   if (!response.ok) throw await parseError(response);
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;

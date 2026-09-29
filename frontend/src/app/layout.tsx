@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 
+import { OperatorGate } from "@/components/auth/OperatorGate";
 import { AppShell } from "@/components/layout/AppShell";
 
 import "./globals.css";
@@ -23,7 +24,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <AppShell>{children}</AppShell>
+        <OperatorGate>
+          <AppShell>{children}</AppShell>
+        </OperatorGate>
       </body>
     </html>
   );

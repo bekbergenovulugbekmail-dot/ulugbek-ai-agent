@@ -68,7 +68,7 @@ async def approve(
     manager = ApprovalManager(session)
     approval = await manager.approve(
         approval_id,
-        decided_by=decision.decided_by or principal.subject,
+        decided_by=principal.subject,
         note=decision.note,
     )
     if background:
@@ -103,7 +103,7 @@ async def reject(
     manager = ApprovalManager(session)
     approval = await manager.reject(
         approval_id,
-        decided_by=decision.decided_by or principal.subject,
+        decided_by=principal.subject,
         note=decision.note,
     )
     if background:

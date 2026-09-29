@@ -60,6 +60,17 @@ class Settings(BaseSettings):
     claude_timeout_seconds: Annotated[float, Field(gt=0)] = 120.0
     claude_max_retries: Annotated[int, Field(ge=0, le=10)] = 2
 
+    # --- Operator authentication ------------------------------------------- #
+    #: The shared secret the operator presents as a bearer token. Separate from
+    #: every provider credential on purpose: a key that pays for model calls
+    #: must not also open the front door. Without it the API serves nothing but
+    #: health, and says why.
+    auth_token: SecretStr | None = None
+    #: How long a stream token lasts. EventSource cannot send a header, so the
+    #: live feed uses a signed, short-lived token in the query string; minutes
+    #: is enough to open a stream and short enough that a leaked URL is stale.
+    auth_stream_token_ttl_seconds: Annotated[float, Field(gt=0, le=3600)] = 300.0
+
     # --- GitHub integration ------------------------------------------------ #
     #: A fine-grained PAT or an installation token. Read from the environment
     #: only; never written to a log, an audit row or an API response.
@@ -110,6 +121,7 @@ class Settings(BaseSettings):
     @field_validator(
         "anthropic_api_key",
         "anthropic_workspace_id",
+        "auth_token",
         "github_token",
         "railway_token",
         mode="before",

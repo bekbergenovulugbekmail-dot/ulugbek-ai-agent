@@ -8,6 +8,7 @@ from fastapi import APIRouter
 from sqlalchemy import text
 
 from ulugbek_ai import __version__
+from ulugbek_ai.api.auth import configured_token_problem
 from ulugbek_ai.api.deps import RegistryDep, SessionDep, SettingsDep
 from ulugbek_ai.llm.claude import workspace_id_problem
 
@@ -21,6 +22,21 @@ def _workspace_report(workspace_id: str | None) -> dict[str, Any]:
         "configured": workspace_id is not None,
         "usable": problem is None,
         "problem": problem,
+    }
+
+
+def _auth_report(token: str | None) -> dict[str, Any]:
+    """Whether the API can authenticate anyone at all — two booleans, no value.
+
+    This is on the open endpoint on purpose. A server with no usable
+    ``AUTH_TOKEN`` refuses every protected route, and from outside that is
+    indistinguishable from a broken deployment; a caller already learns as much
+    from the 503 those routes answer with, so nothing is given away by saying
+    it here, where a starter script or a platform check can see it.
+    """
+    return {
+        "configured": token is not None,
+        "usable": configured_token_problem(token) is None,
     }
 
 
@@ -55,6 +71,11 @@ async def health(
             # malformed one, so both need to be visible from outside.
             "workspace": _workspace_report(settings.anthropic_workspace_id),
         },
+        "auth": _auth_report(
+            settings.auth_token.get_secret_value()
+            if settings.auth_token
+            else None
+        ),
         "tools": {"count": len(registry.list())},
     }
 

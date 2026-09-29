@@ -217,7 +217,10 @@ async def test_approval_round_trip_over_http(
     llm.queue(verdict_reply("SUCCESS", "publish_post returned p-1"))
     resumed = (
         await client.post(
-            f"/api/approvals/{approval_id}/approve", json={"decided_by": "ulugbek"}
+            f"/api/approvals/{approval_id}/approve",
+            # A caller naming itself is a caller that can name someone else,
+            # so the server ignores this and writes the principal.
+            json={"decided_by": "someone-else", "note": "go ahead"},
         )
     ).json()
 
@@ -226,7 +229,8 @@ async def test_approval_round_trip_over_http(
 
     decided = (await client.get(f"/api/approvals/{approval_id}")).json()
     assert decided["status"] == "APPROVED"
-    assert decided["decided_by"] == "ulugbek"
+    assert decided["decided_by"] == "operator"
+    assert decided["decision_note"] == "go ahead"
 
 
 async def test_rejecting_over_http(

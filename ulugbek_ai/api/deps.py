@@ -1,14 +1,13 @@
 """FastAPI dependencies.
 
-Authentication is deliberately a seam rather than an implementation: every
-protected route depends on :func:`require_principal`, so adding real auth in a
-later phase means replacing one function, not touching the routes.
+:func:`require_principal` is the authentication seam. It is not listed on
+individual routes — ``ulugbek_ai/api/router.py`` applies it to whole routers, so
+a new endpoint is protected by being added rather than by being remembered.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -16,25 +15,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ulugbek_ai.agent.engine import AgentEngine
 from ulugbek_ai.agent.runner import BackgroundAgentRunner
+from ulugbek_ai.api.auth import (
+    OPERATOR,
+    Principal,
+    bearer_from_header,
+    configured_token_problem,
+    token_matches,
+)
 from ulugbek_ai.config.settings import Settings, get_settings
 from ulugbek_ai.llm.claude import workspace_id_problem
-from ulugbek_ai.core.errors import ConfigurationError
+from ulugbek_ai.core.errors import AuthenticationError, ConfigurationError
 from ulugbek_ai.database.session import Database, get_database
 from ulugbek_ai.events.service import EventService
 from ulugbek_ai.llm.base import LLMClient
 from ulugbek_ai.tools.registry import ToolRegistry
-
-
-@dataclass(slots=True)
-class Principal:
-    """Who is making the request.
-
-    Until authentication lands there is exactly one principal, the local
-    operator. The type exists so routes can already depend on it.
-    """
-
-    subject: str = "local-operator"
-    is_authenticated: bool = False
 
 
 async def session_dependency() -> AsyncIterator[AsyncSession]:
@@ -120,9 +114,38 @@ def runner_dependency(request: Request) -> BackgroundAgentRunner:
     return runner
 
 
-def require_principal() -> Principal:
-    """Authentication seam. Replace this to enforce real credentials."""
-    return Principal()
+def require_principal(request: Request) -> Principal:
+    """Prove the caller is the operator, or refuse the request.
+
+    Two different failures, kept apart because they need different fixes: a
+    server with no token configured is broken (503, and it says which variable
+    is missing), while a caller without a valid one is unauthenticated (401,
+    with the challenge header that makes it actionable).
+    """
+    settings = settings_dependency(request)
+    secret = settings.auth_token
+
+    problem = configured_token_problem(
+        secret.get_secret_value() if secret else None
+    )
+    if problem is not None:
+        raise ConfigurationError(
+            f"AUTH_TOKEN is not usable: {problem}. The API serves nothing but "
+            "health until it is set to a long random string."
+        )
+
+    presented = bearer_from_header(request.headers.get("Authorization"))
+    if presented is None or not token_matches(
+        presented, secret.get_secret_value()  # type: ignore[union-attr]
+    ):
+        # The same answer either way: saying which half was wrong tells an
+        # attacker whether a token is worth refining.
+        raise AuthenticationError(
+            "This endpoint requires the operator token. Send it in the "
+            "Authorization header."
+        )
+
+    return OPERATOR
 
 
 SessionDep = Annotated[AsyncSession, Depends(session_dependency)]

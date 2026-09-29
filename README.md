@@ -89,7 +89,7 @@ the agent knows nothing about SQL or the Anthropic SDK.
         └────────────┬────────────┘
                      │ REST + Server-Sent Events
                  ┌───┴──────┐
-                 │   api    │  thin routes, error translation, auth seam
+                 │   api    │  thin routes, error translation, the auth guard
                  └────┬─────┘
                       │
                  ┌────▼─────┐
@@ -126,7 +126,7 @@ ulugbek_ai/
 ├── config/          typed settings loaded from the environment
 ├── database/        engine, session scope, portable column types, model registry
 ├── llm/             provider-agnostic interface + ClaudeClient + scripted double
-├── identity/        users (authentication is a later phase; the seam exists)
+├── identity/        users — a stable owner for runs, tasks and memory
 ├── projects/        universal project model + request→project routing
 ├── memory/          typed long-term memory + pluggable retrieval strategy
 ├── tasks/           task model + lifecycle state machine + plan bookkeeping
@@ -168,7 +168,11 @@ npm run dev -- -p 3001            # or: $env:PORT=3001; npm run dev   (PowerShel
 
 **Stack:** Next.js 15 (App Router) · TypeScript (strict) · Tailwind CSS ·
 Vitest + Testing Library. It is a pure client of the API: it imports no backend
-code, holds no secrets, and needs only `NEXT_PUBLIC_API_BASE_URL`.
+code and needs only `NEXT_PUBLIC_API_BASE_URL` to build.
+
+It does hold one secret at runtime — the operator token, typed into the door on
+first use and kept in `localStorage`. It is never built into the bundle, never
+sent anywhere but the backend, and dropped the moment the backend refuses it.
 
 ### Pages
 
@@ -270,6 +274,7 @@ committed.** Secrets are read from the environment only.
 
 | Variable | Description |
 |---|---|
+| `AUTH_TOKEN` | The operator's token, at least 32 characters. Without it every protected route answers 503 and names this variable — refusing everyone is the only safe reading of "no token was set". Generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
 | `ANTHROPIC_API_KEY` | Claude API key. Without it the service still starts and serves every non-agent endpoint; `/api/agent/run` returns a clear configuration error. If the key spans several workspaces, also set `ANTHROPIC_WORKSPACE_ID` — otherwise every request is rejected with a 400. |
 | `DATABASE_URL` | PostgreSQL URL. `postgres://` and `postgresql://` are upgraded to `postgresql+asyncpg://` automatically, so Railway's injected value works unchanged. |
 
@@ -381,7 +386,7 @@ whether a key is configured.
 ### With Docker (recommended)
 
 ```bash
-cp .env.example .env      # set ANTHROPIC_API_KEY
+cp .env.example .env      # set AUTH_TOKEN and ANTHROPIC_API_KEY
 docker compose up --build
 ```
 
@@ -506,6 +511,28 @@ timeline, the project and task lists, and every loading / empty / error state.
 Interactive documentation: `/docs`. All routes are under `API_PREFIX`
 (default `/api`).
 
+**Every route needs the operator token** except `/api/health` and
+`/api/health/tools`, which are open on purpose: a platform has to be able to ask
+whether the service is alive without holding a credential, and they report only
+whether things are configured, never what they are configured to.
+
+```
+Authorization: Bearer $AUTH_TOKEN
+```
+
+Without it, a protected route answers `401` with
+`{"error": {"code": "authentication_required", ...}}` and a `WWW-Authenticate`
+header. A wrong token, a malformed header and a missing one all answer
+identically — the response says nothing about which part was wrong. If the
+server has no `AUTH_TOKEN` configured at all it answers `503` and names the
+variable: refusing everyone is the only safe reading of "no token was set".
+
+The live stream is the one exception, and only in *how* it proves itself:
+`EventSource` cannot send headers, so the console calls
+`POST /api/events/stream-token` with its bearer and gets back a short-lived
+HMAC-signed token to put in the query string. It carries no privileges beyond
+reading the stream and expires on its own — nothing stores it.
+
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/health` | Liveness, database probe, tool count |
@@ -529,7 +556,8 @@ Interactive documentation: `/docs`. All routes are under `API_PREFIX`
 | `POST` | `/api/approvals/{id}/reject` | Reject **and resume the run** |
 | `GET` | `/api/events` | Global activity feed |
 | `GET` | `/api/events/runs/{id}` | Ordered events of one run |
-| `GET` | `/api/events/runs/{id}/stream` | **Live event stream (SSE)** |
+| `POST` | `/api/events/stream-token` | Mint a short-lived token for the stream |
+| `GET` | `/api/events/runs/{id}/stream` | **Live event stream (SSE)** — takes that token |
 | `GET` | `/api/events/state` | The agent's current phase |
 | `GET` | `/api/tools` | The tool registry |
 | `GET` | `/api/tools/executions` | Tool execution history |
@@ -546,6 +574,7 @@ Example:
 
 ```bash
 curl -X POST http://localhost:8000/api/agent/run \
+  -H "Authorization: Bearer $AUTH_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"message": "Which projects do I have?"}'
 ```
@@ -572,12 +601,14 @@ Approving continues the very same run:
 
 ```bash
 curl -X POST http://localhost:8000/api/approvals/<approval_id>/approve \
-  -H 'Content-Type: application/json' -d '{"decided_by": "ulugbek"}'
+  -H "Authorization: Bearer $AUTH_TOKEN" \
+  -H 'Content-Type: application/json' -d '{}'
 ```
 
-**Authentication** is a deliberate seam, not an omission: every protected route
-depends on `require_principal()` in `ulugbek_ai/api/deps.py`. Replacing that one
-function enforces real credentials across the API without touching a route.
+Who decided is **not** in the body. A caller that names the decider is a caller
+that can name someone else, and an approval record is only worth keeping if it
+says who actually made the call — so the server writes the authenticated
+principal and ignores any claim to the contrary.
 
 ---
 
@@ -874,6 +905,20 @@ Every audit payload is redacted on the way in.
 
 ## Security
 
+- **The API is closed by default.** The guard is applied once, where the
+  routers are assembled (`ulugbek_ai/api/router.py`), not route by route: a
+  guard listed on each route is a guard that can be left off one, and when it
+  was listed that way, twenty-one of thirty-three endpoints had no mention of
+  it. Anything added there inherits it; health is the one deliberate exception.
+- **An unauthenticated caller learns nothing.** Router-level dependencies run
+  before an endpoint's own, so the request stops at the guard instead of
+  resolving the LLM dependency first and being told which credential the server
+  is missing.
+- **The operator token is never a user's API key.** `ANTHROPIC_API_KEY`
+  authenticates this server to Anthropic and is rejected as a credential here;
+  `AUTH_TOKEN` is the only thing that opens the API, must be at least 32
+  characters, and is compared with `hmac.compare_digest` so a wrong guess takes
+  the same time as any other.
 - **Secrets come only from the environment.** `ANTHROPIC_API_KEY` is held as a
   `SecretStr`, so even a `repr()` of the settings object cannot leak it.
 - **`.env` is gitignored**; only `.env.example` is committed.
@@ -904,11 +949,16 @@ Every audit payload is redacted on the way in.
 
    | Variable | Value |
    |---|---|
+   | `AUTH_TOKEN` | the operator token — **required**, at least 32 characters |
    | `ANTHROPIC_API_KEY` | your key |
    | `ENVIRONMENT` | `production` |
    | `LOG_JSON` | `true` |
    | `CORS_ORIGINS` | your real origins, **not** `["*"]` |
    | `PERMISSION_EXECUTE` / `PERMISSION_DELETE` | keep `approval` |
+
+   Set `AUTH_TOKEN` **before** the first deploy, not after: the service starts
+   either way and stays healthy, but every protected route answers 503 until it
+   exists, so a console pointed at it looks broken for no visible reason.
 
 4. Migrations run automatically on boot via `entrypoint.sh`
    (`alembic upgrade head`, then uvicorn). Set `RUN_MIGRATIONS=false` to run
@@ -990,6 +1040,19 @@ Then add the pipeline's two settings, next to the API's:
 whose data comes from the API, so using it as the health check would make the
 web service look unhealthy whenever the *backend* was down.
 
+### Checking production from outside
+
+**Actions → Deployment check → Run workflow** looks at the deployment the way a
+browser does: the API URL compiled into the deployed bundle, the CORS headers
+the backend returns to the console's origin, whether an anonymous request is
+refused, and — if *"Also send one real agent request"* is ticked — one real run
+through the endpoint the console uses.
+
+That last part needs a credential, so add the operator token as a repository
+secret named `AUTH_TOKEN` (**Settings → Secrets and variables → Actions**),
+with the same value as the API service's. Without it the check says so and
+fails rather than reporting a 401 as an outage.
+
 ### Putting a human back in the loop
 
 The deploy job runs in the `production` GitHub environment. Adding a required
@@ -1050,8 +1113,10 @@ interface only.
 
 **Add a verification rule** — implement `VerificationCheck` and register it.
 
-**Add authentication** — replace `require_principal()` in
-`ulugbek_ai/api/deps.py`.
+**Add a second operator** — `ulugbek_ai/api/auth.py` holds the whole model in
+one file. `Principal` is where an identity gains a name and a role, and
+`_owned_by()` in `ulugbek_ai/api/routes/agent.py` is the line that maps a
+principal to a user id once there is more than one.
 
 ---
 

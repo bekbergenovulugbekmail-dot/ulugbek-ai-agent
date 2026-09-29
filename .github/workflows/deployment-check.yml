@@ -114,6 +114,38 @@ jobs:
               ;;
           esac
 
+      # The point of authentication is that it is on in production, and the
+      # only way to know that is to ask production without a credential.
+      - name: Does the API require a credential
+        run: |
+          echo "GET $API/system/overview  (no Authorization header)"
+          code=$(curl -sS --max-time 20 -o /tmp/anon.json -w '%{http_code}' \
+                 "$API/system/overview" || echo 000)
+          echo "  HTTP $code"
+          echo
+          case "$code" in
+            401) echo "VERDICT: the API refuses an anonymous caller." ;;
+            503) echo "VERDICT: the API has no usable AUTH_TOKEN, so it is serving"
+                 echo "         nothing but health. Set it on the API service."
+                 echo "API has no usable AUTH_TOKEN" >> /tmp/failures ;;
+            200) echo "VERDICT: the API answered an anonymous caller with data."
+                 echo "         Anyone who finds this URL can run the agent."
+                 echo "API is open to anonymous callers" >> /tmp/failures ;;
+            *)   echo "VERDICT: unexpected HTTP $code."
+                 echo "anonymous request answered HTTP $code" >> /tmp/failures ;;
+          esac
+
+          # The open endpoint says whether a token is configured at all, which
+          # separates "closed" from "broken" without revealing anything.
+          python3 - <<'EOF' || true
+          import json
+          try:
+              auth = json.load(open("/tmp/health.json")).get("auth")
+          except Exception:
+              auth = None
+          print(f"/health reports auth: {auth}")
+          EOF
+
       # NEXT_PUBLIC_* values are compiled into the JavaScript, so the deployed
       # bundle is the only place the truth about them exists.
       - name: Which API URL is compiled into the deployed frontend
@@ -156,11 +188,24 @@ jobs:
       # Opt-in: it creates a run and spends tokens.
       - name: One real agent request, the way the console makes it
         if: inputs.agent_request
+        env:
+          # The operator token, from repository secrets. It is never printed;
+          # only whether it is present.
+          OPERATOR_TOKEN: ${{ secrets.AUTH_TOKEN }}
         run: |
+          if [ -z "$OPERATOR_TOKEN" ]; then
+            echo "The AUTH_TOKEN secret is not set in this repository, so this"
+            echo "check cannot authenticate. Add it under Settings -> Secrets"
+            echo "with the same value as the API service's AUTH_TOKEN."
+            echo "agent request: no AUTH_TOKEN secret to authenticate with" >> /tmp/failures
+            exit 0
+          fi
+
           marker="deployment-check-$(date -u +%Y%m%dT%H%M%SZ)"
           echo "POST $API/agent/runs  (Origin: $WEB)"
           code=$(curl -sS --max-time 60 -o /tmp/start.json -w '%{http_code}' \
                  -X POST "$API/agent/runs" \
+                 -H "Authorization: Bearer $OPERATOR_TOKEN" \
                  -H 'content-type: application/json' \
                  -H "Origin: $WEB" \
                  -d "{\"message\":\"Reply with the single word: pong. ($marker)\"}" \
@@ -180,7 +225,8 @@ jobs:
           echo "watching run $run_id"
           status=""
           for attempt in $(seq 1 40); do
-            curl -fsS --max-time 15 "$API/agent/runs/$run_id" -o /tmp/run.json || true
+            curl -fsS --max-time 15 -H "Authorization: Bearer $OPERATOR_TOKEN" \
+                 "$API/agent/runs/$run_id" -o /tmp/run.json || true
             status=$(python3 -c "import json;print(json.load(open('/tmp/run.json')).get('status',''))" 2>/dev/null || true)
             if [ -n "$status" ] && [ "$status" != "RUNNING" ]; then break; fi
             sleep 3
@@ -190,7 +236,8 @@ jobs:
 
           # One request must produce exactly one run. A console that started a
           # second on the same click would double every bill and side effect.
-          curl -fsS --max-time 20 "$API/agent/runs?limit=20" -o /tmp/runs.json || true
+          curl -fsS --max-time 20 -H "Authorization: Bearer $OPERATOR_TOKEN" \
+               "$API/agent/runs?limit=20" -o /tmp/runs.json || true
           matches=$(python3 -c "import json;print(sum(1 for r in json.load(open('/tmp/runs.json')) if '$marker' in (r.get('input') or '')))" 2>/dev/null || echo "?")
           echo "runs carrying this request's marker: $matches"
 

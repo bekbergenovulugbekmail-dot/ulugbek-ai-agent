@@ -21,5 +21,6 @@ export {
   buildQuery,
   request,
   setAuthTokenProvider,
+  setUnauthorizedHandler,
 } from "./client";
 export * from "./types";

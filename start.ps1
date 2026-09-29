@@ -131,7 +131,7 @@ Write-Step 'Konfiguratsiya'
 $envFile = Join-Path $root '.env'
 if (-not (Test-Path -LiteralPath $envFile)) {
     Fail '.env fayli topilmadi.' @(
-        'Namunadan nusxa oling va ANTHROPIC_API_KEY ni to''ldiring:',
+        'Namunadan nusxa oling, AUTH_TOKEN va ANTHROPIC_API_KEY ni to''ldiring:',
         '  Copy-Item .env.example .env',
         '(.env hech qachon gitga tushmaydi.)'
     )
@@ -275,9 +275,20 @@ try {
     $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 5 -ErrorAction Stop
     $dbMark = if ($health.database.connected) { 'ulangan' } else { 'ULANMAGAN' }
     $llmMark = if ($health.llm.configured) { 'sozlangan' } else { 'SOZLANMAGAN' }
-    Write-Host "    Database: $dbMark   Claude: $llmMark ($($health.llm.model))   Tools: $($health.tools.count)" -ForegroundColor DarkGray
+    $authMark = if ($health.auth.usable) { 'sozlangan' } else { 'SOZLANMAGAN' }
+    Write-Host "    Database: $dbMark   Claude: $llmMark ($($health.llm.model))   Auth: $authMark   Tools: $($health.tools.count)" -ForegroundColor DarkGray
     if (-not $health.llm.configured) {
         Write-Warn '.env ichida ANTHROPIC_API_KEY yo''q - agent ishlamaydi.'
+    }
+    # Without it the API answers only /health, and the console shows nine
+    # broken panels instead of one clear cause.
+    if (-not $health.auth.usable) {
+        if ($health.auth.configured) {
+            Write-Warn '.env ichidagi AUTH_TOKEN juda qisqa - kamida 32 belgi bo''lsin.'
+        } else {
+            Write-Warn '.env ichida AUTH_TOKEN yo''q - API faqat /health ga javob beradi.'
+        }
+        Write-Host '    Yangi token: python -c "import secrets; print(secrets.token_urlsafe(48))"' -ForegroundColor DarkGray
     }
 } catch {
     Write-Warn 'Health javobini o''qib bo''lmadi (API baribir ishlayapti).'

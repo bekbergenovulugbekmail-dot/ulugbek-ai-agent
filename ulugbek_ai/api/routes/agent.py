@@ -15,6 +15,7 @@ from ulugbek_ai.agent.schemas import (
     AgentRunResponse,
     AgentStepRead,
 )
+from ulugbek_ai.api.auth import Principal
 from ulugbek_ai.api.deps import (
     EngineDep,
     PrincipalDep,
@@ -27,6 +28,18 @@ from ulugbek_ai.core.errors import NotFoundError
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 
+def _owned_by(payload: AgentRunRequest, principal: Principal) -> AgentRunRequest:
+    """Run as the authenticated caller, whatever the body claimed.
+
+    ``user_id`` is on the request model because the engine needs it, not
+    because a caller may choose it: a body that names its own owner is a body
+    that can name someone else's. This deployment has one operator, so the
+    engine resolves them; the moment there are two, this is the line that maps
+    the principal to a user id.
+    """
+    return payload.model_copy(update={"user_id": None})
+
+
 @router.post("/run", response_model=AgentRunResponse, summary="Run the agent")
 async def run_agent(
     payload: AgentRunRequest, engine: EngineDep, principal: PrincipalDep
@@ -36,7 +49,7 @@ async def run_agent(
     The response is terminal (``COMPLETED`` / ``FAILED``) or ``WAITING_APPROVAL``
     with the approval that must be decided before the run can continue.
     """
-    return await engine.run(payload)
+    return await engine.run(_owned_by(payload, principal))
 
 
 @router.post(
@@ -58,7 +71,7 @@ async def start_agent_run(
     straight away and follows the work on ``/events/runs/{run_id}/stream``,
     instead of holding a request open for the length of the run.
     """
-    run, resolution = await engine.start(payload)
+    run, resolution = await engine.start(_owned_by(payload, principal))
     # Commit before launching: the background task opens its own session and
     # must be able to see the row.
     await session.commit()

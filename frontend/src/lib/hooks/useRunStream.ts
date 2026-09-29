@@ -109,49 +109,72 @@ export function useRunStream(runId: string | null | undefined): RunStream {
       };
     }
 
-    source = new EventSource(agentApi.streamUrl(runId, 0));
-    setTransport("sse");
+    // The stream needs its own credential: EventSource sends no headers, so
+    // the operator's token is exchanged for a short-lived one that rides in
+    // the query string. Minting it is a request, which makes opening the
+    // stream asynchronous — and if it fails, polling carries the same data
+    // through the same reducer.
+    const attach = (stream: EventSource) => {
+      stream.addEventListener("agent-event", (message) => {
+        try {
+          applyEvent(JSON.parse((message as MessageEvent).data) as AgentEvent);
+        } catch {
+          /* a malformed frame must not break the timeline */
+        }
+      });
 
-    source.addEventListener("agent-event", (message) => {
-      try {
-        applyEvent(JSON.parse((message as MessageEvent).data) as AgentEvent);
-      } catch {
-        /* a malformed frame must not break the timeline */
-      }
-    });
+      stream.addEventListener("agent-state", (message) => {
+        try {
+          setState(
+            JSON.parse((message as MessageEvent).data) as AgentStateSnapshot,
+          );
+        } catch {
+          /* ignore */
+        }
+      });
 
-    source.addEventListener("agent-state", (message) => {
-      try {
-        setState(JSON.parse((message as MessageEvent).data) as AgentStateSnapshot);
-      } catch {
-        /* ignore */
-      }
-    });
+      stream.addEventListener("done", (message) => {
+        stream.close();
+        // The stream closes on any non-running status, approval pauses
+        // included, so the payload decides whether the run is actually over.
+        let status: RunStatus | undefined;
+        try {
+          status = (
+            JSON.parse((message as MessageEvent).data) as { status?: RunStatus }
+          ).status;
+        } catch {
+          /* an unreadable frame falls through to the status check below */
+        }
+        if (status !== undefined && !isTerminalRunStatus(status)) {
+          startPolling();
+          return;
+        }
+        setFinished(true);
+      });
 
-    source.addEventListener("done", (message) => {
-      source?.close();
-      // The stream closes on any non-running status, approval pauses included,
-      // so the payload decides whether the run is actually over.
-      let status: RunStatus | undefined;
+      stream.addEventListener("error", () => {
+        // EventSource retries on its own; if it has given up, fall back.
+        if (stream.readyState === EventSource.CLOSED && !closed) {
+          startPolling();
+        }
+      });
+    };
+
+    void (async () => {
+      let streamToken: string;
       try {
-        status = (JSON.parse((message as MessageEvent).data) as { status?: RunStatus })
-          .status;
+        streamToken = (await agentApi.streamToken()).token;
       } catch {
-        /* an unreadable frame falls through to the status check below */
-      }
-      if (status !== undefined && !isTerminalRunStatus(status)) {
+        // No token, no stream. Polling needs no credential of its own.
         startPolling();
         return;
       }
-      setFinished(true);
-    });
+      if (closed) return;
 
-    source.addEventListener("error", () => {
-      // EventSource retries on its own; if it has given up, fall back.
-      if (source?.readyState === EventSource.CLOSED && !closed) {
-        startPolling();
-      }
-    });
+      source = new EventSource(agentApi.streamUrl(runId, 0, streamToken));
+      setTransport("sse");
+      attach(source);
+    })();
 
     return () => {
       closed = true;

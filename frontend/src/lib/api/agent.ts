@@ -73,10 +73,26 @@ export const agentApi = {
     });
   },
 
+  /**
+   * Mint a token that opens an event stream, and nothing else.
+   *
+   * `EventSource` cannot send an `Authorization` header, and putting the
+   * operator's own token in a URL would write it into browser history and
+   * every proxy log on the way. This one is signed by the server, scoped to
+   * streaming, and expires in minutes.
+   */
+  streamToken(signal?: AbortSignal): Promise<{ token: string; expires_in: number }> {
+    return request<{ token: string; expires_in: number }>("/events/stream-token", {
+      method: "POST",
+      signal,
+    });
+  },
+
   /** URL of the SSE stream for a run — opened by `useRunStream`. */
-  streamUrl(runId: string, afterSequence = 0): string {
+  streamUrl(runId: string, afterSequence = 0, token?: string): string {
     return apiUrl(`/events/runs/${runId}/stream`, {
       after_sequence: afterSequence,
+      ...(token ? { token } : {}),
     });
   },
 };

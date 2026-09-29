@@ -19,12 +19,21 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
 from ulugbek_ai.agent.repository import AgentRunRepository
-from ulugbek_ai.api.deps import DatabaseDep, EventServiceDep
+from ulugbek_ai.api.auth import (
+    bearer_from_header,
+    configured_token_problem,
+    issue_stream_token,
+    stream_token_problem,
+    token_matches,
+)
+from ulugbek_ai.api.deps import DatabaseDep, EventServiceDep, SettingsDep
+from ulugbek_ai.core.errors import AuthenticationError, ConfigurationError
 from ulugbek_ai.core.enums import RunStatus, StepType
 from ulugbek_ai.events.projector import project_steps
 from ulugbek_ai.events.repository import EventRepository
@@ -34,6 +43,12 @@ from ulugbek_ai.events.service import EventService
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/events", tags=["events"])
+
+#: The stream lives on its own router because it is the one endpoint the
+#: operator token cannot reach: ``EventSource`` sends no headers. Everything
+#: here is included *without* the operator guard and proves itself instead —
+#: see :func:`stream_run_events`.
+stream_router = APIRouter(prefix="/events", tags=["events"])
 
 #: How often the stream looks for new events.
 STREAM_POLL_SECONDS = 0.75
@@ -156,7 +171,29 @@ async def _stream_run_events(
     yield _frame("timeout", {"run_id": str(run_id)})
 
 
-@router.get(
+@router.post(
+    "/stream-token",
+    summary="Mint a short-lived token that opens an event stream",
+)
+async def mint_stream_token(settings: SettingsDep) -> dict[str, Any]:
+    """Exchange the operator token for one the browser can put in a URL.
+
+    ``EventSource`` cannot send an ``Authorization`` header, and putting the
+    operator's own token in the query string would write it into browser
+    history, proxy logs and every ``Referer``. This one is signed, opens
+    nothing but a stream, and expires in minutes.
+    """
+    secret = settings.auth_token
+    if secret is None:  # pragma: no cover - the guard already refused
+        raise ConfigurationError("AUTH_TOKEN is not set.")
+    ttl = settings.auth_stream_token_ttl_seconds
+    return {
+        "token": issue_stream_token(secret.get_secret_value(), ttl_seconds=ttl),
+        "expires_in": int(ttl),
+    }
+
+
+@stream_router.get(
     "/runs/{run_id}/stream",
     summary="Live event stream for one run (SSE)",
     response_class=StreamingResponse,
@@ -165,13 +202,35 @@ async def stream_run_events(
     run_id: uuid.UUID,
     request: Request,
     database: DatabaseDep,
+    settings: SettingsDep,
     after_sequence: int = Query(default=0, ge=0),
+    token: str | None = Query(
+        default=None,
+        description="A stream token from POST /events/stream-token.",
+    ),
 ) -> StreamingResponse:
     """Server-Sent Events for a run.
 
     Frames: ``agent-event`` (one timeline entry), ``agent-state`` (phase
     changed), ``done`` (the run settled), ``error``, ``timeout``.
     """
+    secret = settings.auth_token
+    problem = configured_token_problem(
+        secret.get_secret_value() if secret else None
+    )
+    if problem is not None:
+        raise ConfigurationError(f"AUTH_TOKEN is not usable: {problem}.")
+
+    # An operator holding the real token may also open the stream directly —
+    # a terminal can send a header even though a browser cannot.
+    presented = bearer_from_header(request.headers.get("Authorization"))
+    secret_value = secret.get_secret_value()  # type: ignore[union-attr]
+    if presented is None or not token_matches(presented, secret_value):
+        stream_problem = stream_token_problem(secret_value, token)
+        if stream_problem is not None:
+            raise AuthenticationError(
+                f"This stream requires a stream token: {stream_problem}."
+            )
     return StreamingResponse(
         _stream_run_events(database, run_id, after_sequence, request),
         media_type="text/event-stream",

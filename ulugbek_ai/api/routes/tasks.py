@@ -33,7 +33,10 @@ async def create_task(
     payload: TaskCreate, session: SessionDep, principal: PrincipalDep
 ) -> Task:
     """Create a task without running it — the agent can pick it up later."""
-    return await TaskManager(session).create(payload)
+    # The caller does not get to say whose task this is; see agent._owned_by.
+    return await TaskManager(session).create(
+        payload.model_copy(update={"user_id": None})
+    )
 
 
 @router.get("/{task_id}", response_model=TaskRead, summary="Read a task")

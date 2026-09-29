@@ -14,6 +14,9 @@ class UlugbekError(Exception):
 
     code: str = "internal_error"
     http_status: int = 500
+    #: Response headers this error requires. A 401 without a challenge header
+    #: is not a 401 a client can act on.
+    headers: dict[str, str] | None = None
 
     def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
         super().__init__(message)
@@ -93,6 +96,19 @@ class ToolTimeoutError(ToolError):
 
 
 # --- Permissions / approvals ----------------------------------------------- #
+class AuthenticationError(UlugbekError):
+    """The caller did not prove who they are.
+
+    Distinct from :class:`PermissionDeniedError`: this one says *who are you*,
+    that one says *not you*. Collapsing them tells an attacker which resources
+    exist and tells an operator nothing about which half is broken.
+    """
+
+    code = "authentication_required"
+    http_status = 401
+    headers = {"WWW-Authenticate": "Bearer"}
+
+
 class PermissionDeniedError(UlugbekError):
     code = "permission_denied"
     http_status = 403

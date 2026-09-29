@@ -12,9 +12,13 @@ from ulugbek_ai.core.enums import ApprovalStatus, PermissionLevel
 
 
 class ApprovalDecision(BaseModel):
-    """Body of an approve/reject call."""
+    """Body of an approve/reject call.
 
-    decided_by: str | None = Field(default=None, max_length=255)
+    There is deliberately no ``decided_by``: who approved a gated action is an
+    audit fact, and a caller that can name itself can name someone else. The
+    server writes it from the authenticated principal.
+    """
+
     note: str | None = Field(default=None, max_length=2_000)
 
 

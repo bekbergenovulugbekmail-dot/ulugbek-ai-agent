@@ -5,6 +5,42 @@ because a list of verbs is not worth reading later.
 
 ## Unreleased
 
+### The API is no longer open
+
+Until now `require_principal()` returned an operator to everyone who asked.
+Anyone who found the URL could run the agent on the configured key, read every
+project and memory, and decide an approval. It now takes a credential.
+
+- **One shared operator token, applied once.** `AUTH_TOKEN` (at least 32
+  characters, compared in constant time) is required by every route except
+  `/api/health` and `/api/health/tools`. The guard is attached where the
+  routers are assembled rather than listed on each route — when it was listed
+  that way, twenty-one of thirty-three endpoints never mentioned it, the whole
+  event feed and the dashboard's overview among them. Anything added there
+  inherits it.
+- **An unauthenticated caller learns nothing.** Router-level dependencies run
+  before an endpoint's own, so a request stops at the guard instead of first
+  resolving the LLM dependency and being told which credential the server is
+  missing. A wrong token, a malformed header and no header at all answer
+  identically; a server with no token configured answers 503 and names the
+  variable, because refusing everyone is the only safe reading of that.
+- **A credential for the live stream.** `EventSource` cannot send headers, so
+  the console exchanges the operator token for a short-lived HMAC-signed one
+  that rides in the query string. It expires on its own and is stored nowhere.
+- **The caller can no longer name themselves.** `/agent/run` and `/agent/runs`
+  discard any `user_id` in the body, and an approval records the authenticated
+  principal — `decided_by` is gone from the request model. A record of who
+  decided is worth keeping only if the decider did not choose the name.
+- **One door in front of the console.** The operator's token is entered once,
+  kept in `localStorage`, attached to every request, and dropped the moment the
+  backend refuses it — so a rotated token shows one explanation instead of nine
+  unrelated broken panels.
+
+`/api/health` reports whether a usable token is configured, as two booleans.
+The value appears in no log, no error body and no health response, and the
+Anthropic key is rejected as a user credential: it authenticates this server to
+Anthropic and nothing else.
+
 ### Production brought up on Railway
 
 The API and the Web Control Center now run as two Railway services built from

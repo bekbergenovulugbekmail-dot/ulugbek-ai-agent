@@ -16,6 +16,7 @@ import subprocess
 import pytest
 from starlette.testclient import TestClient
 
+from tests.conftest import OPERATOR_TOKEN
 from ulugbek_ai.config.settings import Settings
 from ulugbek_ai.core.errors import ConfigurationError
 from ulugbek_ai.llm.claude import (
@@ -28,7 +29,13 @@ from ulugbek_ai.main import build_llm_client, create_app
 
 def settings_with(**overrides: object) -> Settings:
     overrides.setdefault("database_url", "sqlite+aiosqlite:///:memory:")
+    overrides.setdefault("auth_token", OPERATOR_TOKEN)
     return Settings(_env_file=None, environment="test", **overrides)
+
+
+#: Every request in this module carries the operator token; these tests are
+#: about configuration, not about the guard.
+AUTH = {"Authorization": f"Bearer {OPERATOR_TOKEN}"}
 
 
 # --------------------------------------------------------------------------- #
@@ -307,7 +314,9 @@ def test_the_agent_endpoint_names_the_workspace_variable() -> None:
     app = create_app(settings)
 
     with TestClient(app) as client:
-        response = client.post("/api/agent/run", json={"message": "hello"})
+        response = client.post(
+            "/api/agent/run", json={"message": "hello"}, headers=AUTH
+        )
 
     assert response.status_code >= 400
     assert "ANTHROPIC_WORKSPACE_ID" in response.text

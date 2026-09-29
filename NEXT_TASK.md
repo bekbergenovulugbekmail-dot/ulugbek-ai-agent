@@ -3,14 +3,25 @@
 Production works end to end. What follows is ordered by what would hurt most
 if it stayed as it is, not by what is most interesting to build.
 
-## 1. Authentication — the system is open
+## 1. Set `AUTH_TOKEN` in Railway, then ship the authentication branch
 
-`require_principal()` is a seam with nothing behind it. Anyone who finds
-<https://ulugbek-ai-agent-production.up.railway.app> can run the agent, spend
-tokens on the configured key, read every project and memory, and approve a
-deploy. The console has `setAuthTokenProvider` waiting on the other side.
+The code is written and tested; production is still open until it is deployed,
+and deploying it in the wrong order breaks the service instead of protecting
+it. The order matters:
 
-This is the only item here that is a genuine risk rather than a rough edge.
+1. Generate a token — `python -c "import secrets; print(secrets.token_urlsafe(48))"`
+   — and set `AUTH_TOKEN` on the Railway **API** service. Nothing else changes:
+   the console asks the operator for it in the browser.
+2. Only then merge this branch to the default branch, which deploys it.
+   Deployed without the variable, every route but `/api/health` answers 503 —
+   the service stays healthy while the console shows nothing.
+3. Check it from outside afterwards: `/api/health` still answers without a
+   credential and reports `auth.usable: true`; a protected route answers 401
+   without the header and 200 with it; the console asks for the token once and
+   then runs the agent.
+
+Rotating the token later invalidates every stored copy at once, which is the
+whole recovery procedure.
 
 ## 2. The console's error hint contradicts its own message
 
