@@ -11,13 +11,14 @@ from ulugbek_ai.tools.base import Tool
 from ulugbek_ai.tools.builtin.calculator import CalculatorTool
 from ulugbek_ai.tools.builtin.clock import ClockTool
 from ulugbek_ai.tools.builtin.memory_tools import MemorySearchTool, MemoryWriteTool
-from ulugbek_ai.tools.builtin.projects import ProjectListTool
+from ulugbek_ai.tools.builtin.projects import ProjectCreateTool, ProjectListTool
 
 __all__ = [
     "CalculatorTool",
     "ClockTool",
     "MemorySearchTool",
     "MemoryWriteTool",
+    "ProjectCreateTool",
     "ProjectListTool",
     "default_tools",
 ]
@@ -31,4 +32,5 @@ def default_tools() -> list[Tool]:
         MemorySearchTool(),
         MemoryWriteTool(),
         ProjectListTool(),
+        ProjectCreateTool(),
     ]

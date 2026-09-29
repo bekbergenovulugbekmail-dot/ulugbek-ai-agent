@@ -720,6 +720,7 @@ Built-ins in Phase 1 are local and safe:
 | `memory_search` | READ | Search long-term memory |
 | `memory_write` | WRITE | Store a durable fact; `verify()` re-reads the row to prove the write landed |
 | `project_list` | READ | List known projects |
+| `project_create` | WRITE | Register a project, with the `owner/name` repository the GitHub tools address it by; refuses any other repository shape, and `verify()` re-reads the row |
 
 And the GitHub integration:
 
