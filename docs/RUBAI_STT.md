@@ -348,11 +348,17 @@ It stays dormant until two things exist, and says which one is missing:
 | `RAILWAY_TOKEN` (secret) | the same Railway project token `ci.yml` uses |
 | `RAILWAY_SERVICE_STT` (variable) | this service's name or id in that project |
 
-The service itself has to be created in Railway by hand first — a project token
-can deploy services, not create them. **Empty service**, then Settings → Root
-Directory `services/rubai-stt`, and **no public domain**: the whole security
-argument on this page rests on the model being reachable only over Railway's
-private network.
+The service has to exist in Railway before this job can deploy to it, and
+creating it in the dashboard is the reliable path: **Empty service**, then
+Settings → Root Directory `services/rubai-stt`, and **no public domain** — the
+whole security argument on this page rests on the model being reachable only
+over Railway's private network. (Whether the project token could create a
+service itself has not been tested here; `ci.yml` describes it as scoped to one
+environment and able to deploy.)
+
+Run 36577815298 showed the project holding `Postgres`, `frontend` and
+`ulugbek-ai-agent`, and no speech service — so this is the step that is
+outstanding, not a missing variable.
 
 **There is no health wait in the deploy job**, which is deliberate and not an
 omission. A service with no public domain has no URL for CI to poll. Railway's
