@@ -115,25 +115,14 @@ jobs:
           esac
 
       # The point of authentication is that it is on in production, and the
-      # only way to know that is to ask production without a credential.
-      - name: Does the API require a credential
+      # only way to know that is to ask production, in every wrong way as well
+      # as the right one. Nothing here prints a token: only the status codes
+      # and the field names that came back.
+      - name: The credential is enforced
+        env:
+          OPERATOR_TOKEN: ${{ secrets.AUTH_TOKEN }}
         run: |
-          echo "GET $API/system/overview  (no Authorization header)"
-          code=$(curl -sS --max-time 20 -o /tmp/anon.json -w '%{http_code}' \
-                 "$API/system/overview" || echo 000)
-          echo "  HTTP $code"
-          echo
-          case "$code" in
-            401) echo "VERDICT: the API refuses an anonymous caller." ;;
-            503) echo "VERDICT: the API has no usable AUTH_TOKEN, so it is serving"
-                 echo "         nothing but health. Set it on the API service."
-                 echo "API has no usable AUTH_TOKEN" >> /tmp/failures ;;
-            200) echo "VERDICT: the API answered an anonymous caller with data."
-                 echo "         Anyone who finds this URL can run the agent."
-                 echo "API is open to anonymous callers" >> /tmp/failures ;;
-            *)   echo "VERDICT: unexpected HTTP $code."
-                 echo "anonymous request answered HTTP $code" >> /tmp/failures ;;
-          esac
+          probe=$API/system/overview
 
           # The open endpoint says whether a token is configured at all, which
           # separates "closed" from "broken" without revealing anything.
@@ -143,8 +132,96 @@ jobs:
               auth = json.load(open("/tmp/health.json")).get("auth")
           except Exception:
               auth = None
-          print(f"/health reports auth: {auth}")
+          print(f"0. /health reports auth: {auth}")
           EOF
+          echo
+
+          echo "1. no Authorization header"
+          anon=$(curl -sS --max-time 20 -o /tmp/anon.json -w '%{http_code}' "$probe" || echo 000)
+          echo "   -> HTTP $anon"
+          case "$anon" in
+            401) echo "   the API refuses an anonymous caller." ;;
+            503) echo "   the API has no usable AUTH_TOKEN and is serving nothing but health."
+                 echo "API has no usable AUTH_TOKEN" >> /tmp/failures ;;
+            200) echo "   the API answered an anonymous caller with data."
+                 echo "API is open to anonymous callers" >> /tmp/failures ;;
+            *)   echo "anonymous request answered HTTP $anon" >> /tmp/failures ;;
+          esac
+
+          echo "2. a wrong token of the right shape"
+          bad=$(curl -sS --max-time 20 -o /tmp/bad.json -w '%{http_code}' \
+                -H "Authorization: Bearer wrong-token-of-a-plausible-length-0123456789" \
+                "$probe" || echo 000)
+          echo "   -> HTTP $bad"
+          [ "$bad" = "401" ] || echo "wrong token answered HTTP $bad, expected 401" >> /tmp/failures
+
+          echo "3. the real token, sent without the Bearer scheme"
+          if [ -n "$OPERATOR_TOKEN" ]; then
+            raw=$(curl -sS --max-time 20 -o /tmp/raw.json -w '%{http_code}' \
+                  -H "Authorization: $OPERATOR_TOKEN" "$probe" || echo 000)
+            echo "   -> HTTP $raw"
+            [ "$raw" = "401" ] || echo "a malformed header answered HTTP $raw, expected 401" >> /tmp/failures
+          else
+            echo "   (skipped: no AUTH_TOKEN secret)"
+          fi
+
+          echo "4. the three refusals are indistinguishable"
+          # Saying which half was wrong tells an attacker whether a token is
+          # worth refining, so the bodies must not differ.
+          if cmp -s /tmp/anon.json /tmp/bad.json; then
+            echo "   anonymous and wrong-token bodies are byte-identical:"
+            sed 's/^/     /' /tmp/anon.json; echo
+          else
+            echo "   they differ, which leaks which half was wrong:"
+            sed 's/^/     anon: /' /tmp/anon.json; echo
+            sed 's/^/     bad : /' /tmp/bad.json; echo
+            echo "refusal bodies differ between anonymous and wrong-token" >> /tmp/failures
+          fi
+          echo "   WWW-Authenticate on the refusal:"
+          curl -sS --max-time 20 -D - -o /dev/null "$probe" 2>/dev/null \
+            | grep -i '^www-authenticate' | sed 's/^/     /' \
+            || { echo "     (absent)"; echo "401 carries no WWW-Authenticate challenge" >> /tmp/failures; }
+
+          if [ -z "$OPERATOR_TOKEN" ]; then
+            echo
+            echo "No AUTH_TOKEN secret in this repository, so the positive half of"
+            echo "this check cannot run. Add it under Settings -> Secrets."
+            echo "no AUTH_TOKEN secret to verify the accepted path with" >> /tmp/failures
+            exit 0
+          fi
+
+          echo "5. the real token, correctly presented"
+          good=$(curl -sS --max-time 20 -o /tmp/good.json -w '%{http_code}' \
+                 -H "Authorization: Bearer $OPERATOR_TOKEN" "$probe" || echo 000)
+          echo "   -> HTTP $good"
+          if [ "$good" = "200" ]; then
+            python3 -c "import json;d=json.load(open('/tmp/good.json'));print('   fields returned:', ', '.join(sorted(d)))"
+          else
+            echo "the operator token was refused with HTTP $good" >> /tmp/failures
+          fi
+
+          echo "6. the live stream needs its own credential"
+          dummy=00000000-0000-0000-0000-000000000000
+          s_none=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
+                   "$API/events/runs/$dummy/stream" 2>/dev/null || echo 000)
+          s_forged=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
+                     "$API/events/runs/$dummy/stream?token=9999999999.deadbeef" 2>/dev/null || echo 000)
+          echo "   no token     -> HTTP $s_none"
+          echo "   forged token -> HTTP $s_forged"
+          [ "$s_none" = "401" ] || echo "the stream answered HTTP $s_none without a token" >> /tmp/failures
+          [ "$s_forged" = "401" ] || echo "the stream accepted a forged token (HTTP $s_forged)" >> /tmp/failures
+
+          echo "7. a stream token can be minted with the operator token"
+          mint=$(curl -sS --max-time 20 -o /tmp/mint.json -w '%{http_code}' \
+                 -X POST "$API/events/stream-token" \
+                 -H "Authorization: Bearer $OPERATOR_TOKEN" || echo 000)
+          echo "   -> HTTP $mint"
+          if [ "$mint" = "200" ]; then
+            # Field names and the lifetime, never the token itself.
+            python3 -c "import json;d=json.load(open('/tmp/mint.json'));print('   fields:', ', '.join(sorted(d)), '| expires_in:', d.get('expires_in'))"
+          else
+            echo "minting a stream token answered HTTP $mint" >> /tmp/failures
+          fi
 
       # NEXT_PUBLIC_* values are compiled into the JavaScript, so the deployed
       # bundle is the only place the truth about them exists.
@@ -247,6 +324,69 @@ jobs:
           else
             echo "VERDICT: status=$status, runs for this request=$matches (expected COMPLETED and 1)."
             echo "console-path run: status=$status, runs=$matches" >> /tmp/failures
+          fi
+          echo
+
+          # The stream, opened the way the console opens it: a token minted
+          # with the operator's, then handed to an EventSource-shaped GET.
+          # The URL carries that token, so nothing about this call is printed
+          # except its status and the frame names that came back.
+          echo "The live stream, on this run"
+          curl -sS --max-time 20 -o /tmp/mint.json -X POST "$API/events/stream-token" \
+               -H "Authorization: Bearer $OPERATOR_TOKEN" >/dev/null 2>&1 || true
+          stream_token=$(python3 -c "import json;print(json.load(open('/tmp/mint.json')).get('token',''))" 2>/dev/null || true)
+          if [ -z "$stream_token" ]; then
+            echo "  could not mint a stream token"
+            echo "stream: no token could be minted" >> /tmp/failures
+          else
+            sse=$(curl -sS --max-time 25 -N -o /tmp/sse.txt -w '%{http_code} %{content_type}' \
+                  -H 'Accept: text/event-stream' \
+                  "$API/events/runs/$run_id/stream?token=$stream_token" 2>/dev/null || echo "000 none")
+            echo "  -> HTTP $sse"
+            echo "  frame types received:"
+            grep -E '^event:' /tmp/sse.txt | sort | uniq -c | sed 's/^/    /' || echo "    (none)"
+            frames=$(grep -c '^event:' /tmp/sse.txt || true)
+            case "$sse" in
+              "200 text/event-stream"*)
+                if [ "${frames:-0}" -gt 0 ]; then
+                  echo "  VERDICT: the stream authenticated with a minted token and delivered"
+                  echo "           $frames frames for this run."
+                else
+                  echo "  VERDICT: the stream opened but sent nothing."
+                  echo "stream: opened but delivered no frames" >> /tmp/failures
+                fi
+                ;;
+              *) echo "  VERDICT: the stream did not open (HTTP $sse)."
+                 echo "stream: did not open ($sse)" >> /tmp/failures ;;
+            esac
+          fi
+          echo
+
+          # The synchronous endpoint is a different path through the same
+          # engine -- it holds the request open instead of handing the run to a
+          # background task -- so a working /agent/runs says nothing about it.
+          echo "POST $API/agent/run  (synchronous)"
+          sync_marker="deployment-check-sync-$(date -u +%Y%m%dT%H%M%SZ)"
+          sync=$(curl -sS --max-time 120 -o /tmp/sync.json -w '%{http_code}' \
+                 -X POST "$API/agent/run" \
+                 -H "Authorization: Bearer $OPERATOR_TOKEN" \
+                 -H 'content-type: application/json' \
+                 -d "{\"message\":\"Reply with the single word: pong. ($sync_marker)\"}" \
+                 || echo 000)
+          echo "  HTTP $sync"
+          if [ "$sync" = "200" ]; then
+            python3 -c "import json;r=json.load(open('/tmp/sync.json'));[print(f'    {k}: {r.get(k)}') for k in ('status','output','error','iterations','verification')]"
+            sync_status=$(python3 -c "import json;print(json.load(open('/tmp/sync.json')).get('status',''))")
+            if [ "$sync_status" = "COMPLETED" ]; then
+              echo "  VERDICT: the synchronous endpoint completed a real run."
+            else
+              echo "  VERDICT: status=$sync_status, expected COMPLETED."
+              echo "synchronous run: status=$sync_status" >> /tmp/failures
+            fi
+          else
+            cat /tmp/sync.json 2>/dev/null || true
+            echo
+            echo "synchronous run rejected with HTTP $sync" >> /tmp/failures
           fi
 
       # A check that stays green while production is down is worse than no
