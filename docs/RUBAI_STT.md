@@ -52,6 +52,19 @@ and the image build verifies all three.
 | Conversion licence | **Apache-2.0**, with `base_model: islomov/rubaistt_v2_medium` declared |
 | Runtime | [whisper.cpp](https://github.com/ggml-org/whisper.cpp) **v1.9.4** — **MIT** |
 
+Voice activity detection, carried in the image and switched off (run
+36566313739 produced these):
+
+| | |
+|---|---|
+| Repository | [`ggml-org/whisper-vad`](https://huggingface.co/ggml-org/whisper-vad) |
+| Commit | `9ffd54a1e1ee413ddf265af9913beaf518d1639b` |
+| File | `ggml-silero-v5.1.2.bin` |
+| Size | 885,098 bytes (865 KiB) |
+| sha256 | `29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf` |
+| Licence | **MIT** |
+| Upstream | Silero VAD, MIT |
+
 The licence chain is Apache-2.0 → Apache-2.0 → MIT, with the conversion's card
 naming its base model, so the whole stack is redistributable.
 
@@ -126,39 +139,92 @@ about it. (The sample is the same sentence twice, so it is a poor measure of
 it several times. It is a decisive measure of *that they differ*, which is the
 question that matters here.)
 
-### So: not the default, and now impossible to set unsafely
+### So: a fixed number is the wrong shape
 
-`RUBAI_AUDIO_CTX` stays **0**. Audio past the shortened window is not
+A *pinned* 768 was never adopted. Audio past the shortened window is not
 transcribed badly — it is not transcribed at all, and the request still
-succeeds with a plausible-looking transcript that is missing its end. Making
-that the default while `STT_MAX_SECONDS` accepts 60 would be shipping silent
-data loss in exchange for a latency number.
+succeeds with a plausible-looking transcript that is missing its end. A single
+number that is right for a five-second command is wrong for a twenty-second
+one, and the recording limit is sixty.
 
-The service now **refuses to start** when the context cannot reach the end of a
-recording it would accept, naming both variables. So the way to take the 50% is
-to take it deliberately:
+The answer was to stop picking a number. `whisper-server` reads `audio_ctx`
+from the request form as well as the command line
+(`examples/server/server.cpp:510`), so one warm model can serve a window sized
+to each recording: `ceil((duration + headroom) × 50)`, floored at 256, and 0
+once that reaches whisper's full 1500. The window then always reaches the end
+of the audio, which is the property a fixed number cannot have.
 
-```
-RUBAI_AUDIO_CTX=768
-STT_MAX_SECONDS=15        # 768 / 50 — the service checks this arithmetic
-```
+A pinned number is still available, and the service **refuses to start** when
+one cannot reach the end of a recording it would accept — naming both
+variables, because that combination loses words without saying so.
 
-Fifteen seconds is a long spoken command, so for this console that may well be
-the right trade. It is a decision about what the product accepts, not a tuning
-knob, which is why it is not made here.
+## Long speech: what the window does, and what VAD does
 
-### The next candidate: VAD
+Run **36566943407**, one GitHub runner (4 vCPU), three configurations one after
+the other on the same image and the same samples. Every speech sample is the
+same eleven-second sentence repeated a known number of times, so "did anything
+go missing" is a count of a distinctive phrase rather than a judgement: fewer
+means speech was dropped, more means the decoder repeated itself.
 
-Not implemented, and not measured. whisper.cpp v1.9.4 ships voice activity
-detection (`--vad`, with `--vad-model`). It addresses the same waste from the
-other end: instead of shortening the window, it drops the silence inside it, so
-a two-second command carries two seconds of audio into the encoder rather than
-thirty. It should compose with a shortened context rather than compete with it,
-and it would likely also fix `musiqa` — there is nothing to hallucinate over if
-the silence never reaches the model.
+### Transcript integrity — phrase occurrences, found/expected
 
-It needs a second model file (a few MB), a second pinned checksum, and its own
-run of this harness. Worth doing next; not done here.
+| sample | audio | `full` (ctx 0) | `auto` | `auto+vad` |
+|---|---|---|---|---|
+| `jfk.wav` | 11 s | 1/1 | **1/1** | 1/1 |
+| `jfk.webm` (Opus) | 11 s | 1/1 | **1/1** | 1/1 |
+| `speech-22s` | 22 s | **1/2 ✗** | **2/2 ✓** | 1/2 ✗ |
+| `speech-33s` | 33 s | 3/3 | **3/3** | 3/3 |
+| `speech-55s` | 55 s | 5/5 | **5/5** | **2/5 ✗** |
+| `gap3-25s` (speech · 3 s · speech) | 25 s | 2/2 | **2/2** | 2/2 |
+| `gap15-37s` (speech · 15 s · speech) | 37 s | **1/2 ✗** | **1/2 ✗** | 2/2 ✓ |
+| `silence-30s` | 30 s | 0/0 | **0/0** | 0/0 |
+| `speech-66s` | 66 s | HTTP 413 | **HTTP 413** | HTTP 413 |
+
+### Wall time, ms
+
+| sample | `full` | `auto` | `auto+vad` | window `auto` used |
+|---|---|---|---|---|
+| `jfk.wav` 11 s | 21,269 | **9,330** (−56%) | 9,451 | 651 |
+| `jfk.webm` 11 s | 21,323 | **9,291** (−56%) | 9,366 | 651 |
+| `speech-22s` | 21,306 | **17,880** (−16%) | 17,179 | 1201 |
+| `speech-33s` | 43,671 | 55,575 | 23,806 | 0 |
+| `speech-55s` | 47,018 | 59,870 | 44,490 | 0 |
+| `gap3-25s` | 22,371 | 20,428 | 20,661 | 1351 |
+| `gap15-37s` | 42,846 | 43,188 | 22,912 | 0 |
+| `silence-30s` | 20,431 | 20,408 | **503** | 0 |
+
+Memory: 920 MiB `full`, 1.05 GiB `auto`, 899 MiB `auto+vad`.
+
+**The 33 s and 55 s rows are noise, not signal.** Both configurations send
+`audio_ctx=0` there — past whisper's own 30-second chunk the window goes back
+to the full 1500 — so they run identical code and the 27% spread between them
+is the runner. Read it as the noise floor for every other number on this page.
+
+### What was decided
+
+**`auto` is the default.** For audio inside one chunk it is a little more than
+twice as fast on a spoken command, and it did not lose a word anywhere the
+baseline did not lose one first. It also *fixed* a case the full window got
+wrong: at 22 seconds the baseline returned one sentence out of two, and sizing
+the window to the audio returned both.
+
+**VAD stays off.** It is the fastest thing here on silence — 20,431 ms to 503,
+because there is nothing to decode — and it is the only configuration that gets
+the fifteen-second gap right. It also **lost three sentences out of five** on
+the 55-second sample and one of two at 22 seconds. A transcriber that silently
+drops speech it judged too quiet is not a latency improvement; it is the
+failure this whole exercise exists to avoid. The model is carried in the image
+and one variable away, for whoever wants to measure it against a different
+threshold.
+
+### Known, and not fixed here
+
+**A long silence in the middle of speech loses the second half.** `gap15-37s`
+returned one sentence of two under both `full` and `auto` — this is whisper's
+own segment handling, present before any of this work and unchanged by it. VAD
+fixes it and costs more than it saves. The next thing to try is
+`--vad-min-silence-duration-ms` tuned up, or splitting on long silences in the
+service; neither is done, and neither is measured.
 
 ---
 
@@ -185,9 +251,19 @@ STT_MAX_BYTES=10485760
 STT_MAX_SECONDS=60
 RUBAI_CONCURRENCY=1
 WHISPER_THREADS=<defaults to the container's CPU count>
-RUBAI_AUDIO_CTX=0            # 768 halves the latency but hears only 15.4s;
-                             # the service refuses to start unless
-                             # STT_MAX_SECONDS is lowered to match
+
+# The encoder window. `auto` (the default) sizes it to each recording, so a
+# short command is cheap and a long one is still heard to the end. A number
+# pins every request to it — and the service then refuses to start unless
+# STT_MAX_SECONDS fits inside that window, because a pinned window that cannot
+# reach the end of an accepted recording loses the end of it silently.
+RUBAI_AUDIO_CTX=auto         # auto | 0 (whisper's full 1500) | a number
+RUBAI_AUDIO_CTX_HEADROOM_SECONDS=2
+RUBAI_AUDIO_CTX_FLOOR=256
+
+# Voice activity detection: drops silence before whisper decodes it. Off until
+# measured — a detector that mistakes quiet speech for silence removes words.
+RUBAI_VAD=off
 ```
 
 Neither value is ever sent to the browser. The console talks to the API, the

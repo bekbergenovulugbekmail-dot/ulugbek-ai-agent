@@ -195,16 +195,21 @@ Two CI runs of the same image on the same sample measured **21,493 ms** and
 latency from CI is worth ±80% and a Railway container will be its own number
 again. 873 MiB of container memory, which is not the constraint.
 
-**Shortening the encoder context halves it.** Measured on run 36563879708:
-−48.5% on 11 s of speech, −50.9% on a 5 s clip, and identical transcripts —
-for audio that fits inside the shortened window. 768 positions cover 15.4 s,
-and the 22-second sample came back different. So `RUBAI_AUDIO_CTX` stays 0, and
-the service now refuses to start when the context cannot reach the end of a
-recording it would accept: silent truncation is worse than any error.
+**The encoder window is now sized to each recording**, which `whisper-server`
+allows because it reads `audio_ctx` from the request form. Measured on run
+36566943407 across nine samples: 11 s of speech went 21,269 → 9,330 ms, and the
+22-second sample came back *complete* where the full window had returned one
+sentence of two. 11, 22, 33 and 55 seconds all returned every sentence; 66 s is
+refused with 413. No chunking, no overlap, no merging — so no duplicated words
+and no lost order.
 
-Taking the 50% means deciding that a spoken command is at most 15 seconds —
-a product decision, in `docs/RUBAI_STT.md` along with the next candidate (VAD,
-documented and not implemented).
+**VAD is carried and off.** Fastest on silence by far (20,431 → 503 ms) and the
+only thing that gets a 15-second mid-speech pause right, but it lost three
+sentences of five at 55 s. `docs/RUBAI_STT.md` has the table and the model's
+provenance.
+
+Still open: a long silence inside speech loses the second half, under both the
+full and the sized window. It predates this work.
 
 ## Pipeline
 

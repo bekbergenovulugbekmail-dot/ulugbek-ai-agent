@@ -27,20 +27,20 @@ window. With the agent's own ~9 s that is half a minute per spoken command.
 This is the one decision nobody else can make, because each way out costs
 something different:
 
+**The window is done and needs no decision.** Sizing it per recording is the
+default, measured at roughly half the time for a spoken command with nothing
+lost at 11, 22, 33 or 55 seconds. What is left is money or accuracy:
+
 | | Effect | Cost |
 |---|---|---|
-| `RUBAI_AUDIO_CTX=768` + `STT_MAX_SECONDS=15` | **Measured: half the time**, transcripts identical for audio that fits | A spoken command may be at most 15 seconds |
-| VAD (`--vad`) | Drops silence before the encoder sees it; would likely also fix `musiqa` | A second model and checksum. Not implemented, not measured |
 | More vCPU on that service | Scales to roughly 8 threads | Money, monthly, continuously |
 | A Whisper **small** fine-tune | ~3× faster, ~250 MiB | Worse on Uzbek, which is why it was fine-tuned |
+| VAD, with a tuned threshold | Fastest on silence by far; fixes the long-pause case | As shipped it **lost three sentences of five** at 55 s. Needs a threshold someone has measured |
 | Back to a cloud API | Fast, nothing always-on | A per-minute bill, and the audio leaves the deployment |
 
-The first row is measured, not estimated: −48.5% on 11 s of speech and −50.9%
-on a 5 s clip, with byte-identical output. It is not the default because 768
-positions hear only 15.4 seconds and the recording limit is 60 — the service
-now refuses to start with that combination rather than silently dropping the
-end of a sentence. Setting both together is the decision: **is a spoken command
-ever longer than fifteen seconds?**
+A spoken command now takes about 9.3 s to transcribe on four shared vCPU, plus
+the agent's own ~9 s. Whether that is good enough to talk to is the question;
+if it is not, the first row is the honest fix and the rest are trades.
 
 ## Deploy the speech service
 

@@ -5,6 +5,42 @@ because a list of verbs is not worth reading later.
 
 ## Unreleased
 
+### The encoder window now fits the recording
+
+`whisper-server` reads `audio_ctx` from the request form, not only from the
+command line. That removes the problem a fixed window created: the service
+already measures each recording to enforce its limit, so it asks for a window
+that fits it — no chunking, no overlap, no transcripts to merge, and so no
+duplicated words at a seam and no order to get wrong.
+
+Measured across nine samples and three configurations (run 36566943407):
+
+- **A spoken command is a little more than twice as fast.** 11 seconds of
+  speech went from 21,269 ms to 9,330 ms, the same audio as Opus from 21,323 to
+  9,291 — the window was 651 positions instead of the full 1500.
+- **It fixed a case the full window got wrong.** At 22 seconds the baseline
+  returned one sentence out of two; sizing the window to the audio returned
+  both.
+- **Nothing was lost anywhere.** 11, 22, 33 and 55 seconds all returned every
+  sentence, a 30-second silence returned nothing, and 66 seconds was refused
+  with 413 as it should be.
+- Past whisper's own 30-second chunk the window goes back to the full 1500, so
+  those samples run the same code in both configurations — the 27% spread
+  between them there is the runner, and is the noise floor for everything else.
+
+**Voice activity detection is carried and switched off.** It is by far the
+fastest thing on silence — 20,431 ms to 503 — and the only configuration that
+gets a fifteen-second pause mid-sentence right. It also lost three sentences of
+five on the 55-second sample. A transcriber that silently drops speech it
+judged too quiet is not a latency improvement, so it needs a threshold someone
+has measured before it goes anywhere near a default. The model is pinned like
+the rest: `ggml-org/whisper-vad` @ `9ffd54a1`, 885,098 bytes, sha256
+`29940d98…`, MIT.
+
+Known and unfixed: a long silence in the middle of speech loses the second
+half. That is whisper's own segment handling, it predates this work, and the
+only thing that fixed it in these runs cost more than it saved.
+
 ### Speech runs on our own hardware, and is too slow to use as it stands
 
 Transcription moved from Google to **rubaiSTT v2 medium** — a Whisper-medium

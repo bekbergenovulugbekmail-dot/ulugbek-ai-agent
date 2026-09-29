@@ -156,7 +156,7 @@ jobs:
                   "$( [ "$found" = "$expected" ] && echo OK || echo MISMATCH )"
                 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                   "$label" "$sample" "$found/$expected" "$wall" "$duration" \
-                  "$ctx_used" "$(printf '%s' "$text" | head -c 200)" \
+                  "$ctx_used" "$(printf '%s' "$text" | tr '\n\t' '  ' | head -c 200)" \
                   >> /tmp/results.tsv
               done
             done
