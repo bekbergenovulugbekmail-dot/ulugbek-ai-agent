@@ -161,7 +161,7 @@ working one says nothing about the other.
 | Backend | migrations up→down→up on PostgreSQL 16, schema drift, 375 tests, pyflakes |
 | Web Control Center | typecheck, lint, 67 tests, production build |
 | Deploy to Railway | default branch only; waits for `/api/health` to answer `ok`, and fails if the deployed service has no usable token |
-| Deploy the Web Control Center | default branch only; waits for `/healthz`. Dormant until `RAILWAY_SERVICE_WEB` is set — while it is unset the job prints the names of the services the token can reach, so the value is copied rather than guessed |
+| Deploy the Web Control Center | default branch only; deploys `frontend` and waits for `/healthz`. If `RAILWAY_SERVICE_WEB` is ever unset it skips and prints the services the token can reach, rather than leaving the value to be guessed |
 
 Deploys are not cancelled. The workflow still cancels a superseded run on a
 working branch, but never on the branch that deploys: cancelling there kills
@@ -174,12 +174,26 @@ the same service at the same time; the later one waits rather than racing.
 deploys.** Both paths work alone; with both on, every push deploys twice and
 the two races decide which image ends up live.
 
-Verified on CI run 36546729076 (2026-09-29): Backend, Web Control Center and
-Deploy to Railway all green — the API deployed and `/api/health` answered
-`status: ok` with `auth.usable: true` — and the web deploy skipped as designed,
-after printing the project's services: `Postgres`, `frontend`,
-`ulugbek-ai-agent`. So the value `RAILWAY_SERVICE_WEB` needs is `frontend`, and
-it came from the token's own view of the project rather than from a guess.
+### Both services now deploy from CI
+
+Verified on 2026-09-29 across three runs.
+
+| Run | What it showed |
+|---|---|
+| 36546729076 | Backend, console suite and the API deploy green; the web deploy skipped and printed the project's services — `Postgres`, `frontend`, `ulugbek-ai-agent` — which is where the value of `RAILWAY_SERVICE_WEB` came from |
+| 36550451420 | With the variable set, the web deploy **failed**: `Root directory "/frontend" was not found in the deployed source` |
+| 36551022651 | With the service's Root Directory cleared, the web deploy built `frontend/Dockerfile` and `/healthz` answered `{"status":"ok","service":"web"}` |
+
+That failure settled a question the repository could not answer on its own:
+**`railway up` applies the service's Root Directory to the uploaded source.**
+The job uploads `frontend/`, so the `frontend` service's Root Directory must be
+empty — the CLI has already narrowed the source to the right folder.
+
+Which creates one coupling worth knowing: with an empty Root Directory, a
+build triggered by Railway's own GitHub integration would use the *repository
+root* — the root `railway.json`, the root `Dockerfile`, the backend image — on
+the console's domain. So that integration is not merely redundant for this
+service; it must stay off.
 
 `.github/workflows/deployment-check.yml` is manual: it looks at production the
 way a browser does — the API URL compiled into the deployed bundle, the CORS

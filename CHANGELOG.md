@@ -28,6 +28,16 @@ deploys: with both on, every push deploys twice and the two races decide which
 image ends up live. That is a dashboard setting, and the workflow header says
 so where someone reading it will look.
 
+**Both services now deploy from CI.** Turning the web deploy on produced one
+failure worth recording: `Root directory "/frontend" was not found in the
+deployed source`. `railway up` applies the service's Root Directory to the
+uploaded source, and the job uploads `frontend/` — so that service's Root
+Directory has to be empty, because the CLI has already narrowed the source.
+With it cleared, the deploy built `frontend/Dockerfile` and `/healthz` answered
+`{"status":"ok","service":"web"}`. The consequence is now in the docs: an empty
+Root Directory means a GitHub-integration build of that service would use the
+repository root and put the backend image on the console's domain.
+
 ### The console stops contradicting the backend
 
 `ErrorState` showed the backend's precise configuration message and then, under
