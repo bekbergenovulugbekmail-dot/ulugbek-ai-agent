@@ -57,7 +57,14 @@ jobs:
           ffmpeg -loglevel error -i /tmp/jfk.wav -c:a libopus -f webm /tmp/jfk.webm -y
           ffmpeg -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono -t 5 /tmp/5s.wav -y
           ffmpeg -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono -t 30 /tmp/30s.wav -y
-          ls -l /tmp/jfk.wav /tmp/jfk.webm /tmp/5s.wav /tmp/30s.wav
+          # Speech longer than the shortened window. An encoder context of 768
+          # covers roughly 768/1500 of a 30-second window — about 15 seconds —
+          # so anything said after that is simply not encoded. A clip that fits
+          # cannot show that, and every other speech sample here fits.
+          printf "file '/tmp/jfk.wav'\nfile '/tmp/jfk.wav'\n" > /tmp/concat.txt
+          ffmpeg -loglevel error -f concat -safe 0 -i /tmp/concat.txt \
+            -c copy /tmp/jfk-long.wav -y
+          ls -l /tmp/jfk.wav /tmp/jfk.webm /tmp/jfk-long.wav /tmp/5s.wav /tmp/30s.wav
 
       - name: Measure
         env:
@@ -96,7 +103,7 @@ jobs:
             echo "ready in $(( $(date +%s) - ready_start ))s"
             echo
 
-            for sample in jfk.wav jfk.webm 5s.wav 30s.wav; do
+            for sample in jfk.wav jfk.webm jfk-long.wav 5s.wav 30s.wav; do
               for repeat in $(seq 1 "$REPEATS"); do
                 start=$(date +%s%3N)
                 code=$(curl -sS -o /tmp/out.json -w '%{http_code}' \
@@ -154,7 +161,7 @@ jobs:
               rows[(ctx, sample)].append((int(wall), float(duration), float(rtf)))
               texts[(ctx, sample)] = "\t".join(rest)
 
-          samples = ["jfk.wav", "jfk.webm", "5s.wav", "30s.wav"]
+          samples = ["jfk.wav", "jfk.webm", "jfk-long.wav", "5s.wav", "30s.wav"]
 
           def best(ctx, sample):
               measured = rows.get((ctx, sample))
@@ -183,5 +190,16 @@ jobs:
               for ctx in (base_ctx, cand_ctx):
                   text = texts.get((ctx, sample))
                   if text is not None:
-                      print(f"  ctx={ctx:>4} {sample:<10} {text[:100]!r}")
+                      print(f"  ctx={ctx:>4} {sample:<12} {text[:160]!r}")
+
+          print()
+          print("Did the transcript survive?")
+          for sample in samples:
+              a, b = texts.get((base_ctx, sample)), texts.get((cand_ctx, sample))
+              if a is None or b is None:
+                  continue
+              verdict = "identical" if a == b else "CHANGED"
+              # Length is the tell for truncation: a shortened window does not
+              # garble the words it heard, it stops having heard the rest.
+              print(f"  {sample:<12} {verdict:>9}   {len(a)} -> {len(b)} chars")
           EOF
