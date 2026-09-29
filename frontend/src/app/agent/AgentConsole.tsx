@@ -17,6 +17,7 @@ import { AgentStatus } from "@/components/agent/AgentStatus";
 import type { ChatEntry } from "@/components/agent/ChatMessage";
 import { ChatMessage } from "@/components/agent/ChatMessage";
 import { CommandInput } from "@/components/agent/CommandInput";
+import { VoiceButton } from "@/components/agent/VoiceButton";
 import { ApprovalCard } from "@/components/cards/ApprovalCard";
 import { ToolExecutionCard } from "@/components/cards/ToolExecutionCard";
 import { Card, CardHeader } from "@/components/ui/Card";
@@ -36,6 +37,7 @@ import {
 import { truncate } from "@/lib/format";
 import { useResource } from "@/lib/hooks/useResource";
 import { useRunStream } from "@/lib/hooks/useRunStream";
+import { isSpeechSupported, speak } from "@/lib/voice/speech";
 
 let localId = 0;
 const nextId = () => `local-${++localId}`;
@@ -52,9 +54,20 @@ export function AgentConsole() {
   const [projectId, setProjectId] = useState<string | null>(null);
   const [error, setError] = useState<ApiError | undefined>();
   const [approval, setApproval] = useState<Approval | undefined>();
+  // The command box is driven from here so a transcript can be written into
+  // it. It is still the operator who presses Send.
+  const [command, setCommand] = useState("");
+  // The last answer worth reading aloud. Only a finished run has one: a run
+  // paused for approval has decided nothing yet.
+  const [spoken, setSpoken] = useState<string | null>(null);
+  const [canSpeak, setCanSpeak] = useState(false);
 
   const answered = useRef<Set<string>>(new Set());
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // After mount: there is no speechSynthesis on the server, and a button that
+  // appears and then vanishes is worse than one that arrives a tick late.
+  useEffect(() => setCanSpeak(isSpeechSupported()), []);
 
   const stream = useRunStream(runId);
   const projects = useResource((signal) => projectApi.list({ limit: 50 }, signal), []);
@@ -103,6 +116,7 @@ export function AgentConsole() {
         ];
         if (run.output) {
           answered.current.add(runId);
+          setSpoken(run.output);
           restored.push({
             id: nextId(),
             role: "agent",
@@ -143,6 +157,7 @@ export function AgentConsole() {
           answered.current.delete(runId);
           return;
         }
+        if (run.output) setSpoken(run.output);
         setEntries((current) => [
           ...current,
           {
@@ -187,6 +202,8 @@ export function AgentConsole() {
     async (message: string) => {
       setSending(true);
       setError(undefined);
+      setSpoken(null);
+      setCommand("");
       setEntries((current) => [
         ...current,
         {
@@ -311,12 +328,29 @@ export function AgentConsole() {
 
           {error && <ErrorState error={error} />}
 
+          {spoken && canSpeak && (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => void speak(spoken)}
+                className="rounded-lg border border-line bg-elevated px-2.5 py-1 text-2xs text-ink-muted transition-colors hover:text-ink"
+              >
+                🔊 O&apos;qib berish
+              </button>
+            </div>
+          )}
+
           <CommandInput
             onSubmit={send}
             busy={busy}
             projects={projects.data ?? []}
             projectId={projectId}
             onProjectChange={setProjectId}
+            value={command}
+            onValueChange={setCommand}
+            accessory={
+              <VoiceButton onTranscript={setCommand} disabled={busy} />
+            }
             autoFocus
           />
         </div>

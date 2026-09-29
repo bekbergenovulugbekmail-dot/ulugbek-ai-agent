@@ -17,6 +17,33 @@ There is no form. Every project is created with a POST, which makes the
 Projects page read-only in practice and the GitHub and Railway bindings
 awkward to set up.
 
+## Turn the microphone on
+
+Voice is implemented, tested and deployed; it is off because it has no key.
+
+1. Google Cloud → a project with **Cloud Speech-to-Text API** enabled → an API
+   key **restricted to that API**.
+2. Railway → the **ulugbek-ai-agent** (API) service → Variables →
+   `STT_API_KEY`. Nothing on the web service: the browser never holds the key.
+3. `/api/health` then reports `stt: {configured: true, usable: true}`, and the
+   microphone button appears in the console.
+
+Until then the console hides the button, `/api/voice/transcribe` answers 503
+naming the variable, and nothing else is affected.
+
+Two things worth knowing before the first real recording:
+
+- **Safari and iOS cannot use it.** They record `audio/mp4`, which Google's API
+  cannot decode. The console hides the button there rather than failing on
+  every upload. Fixing it means either a provider that reads MP4 or a
+  transcoding step, and the second adds `ffmpeg` to the image.
+- **Nobody has measured the transcription quality yet.** Uzbek is low-resource
+  and vendor accuracy claims do not survive contact with a real microphone.
+  Record twenty of your own commands — short, long, and with the English
+  technical words you actually use — and compare Google against a local
+  provider before assuming the choice is settled. `SpeechToText` exists so the
+  answer is one adapter.
+
 ## Confirm, once
 
 The `frontend` Railway service now has an **empty Root Directory** — that is

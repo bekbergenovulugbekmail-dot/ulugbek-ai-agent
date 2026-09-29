@@ -152,14 +152,50 @@ Both agent paths were exercised on purpose: `/agent/runs` hands the run to a
 background task on its own session, `/agent/run` holds the request open, and a
 working one says nothing about the other.
 
+## Voice
+
+Implemented and tested. **Not live**: `STT_API_KEY` is not set on the Railway
+API service, so the console shows no microphone in production yet.
+
+```
+🎤 MediaRecorder (audio/webm;codecs=opus)
+ → POST /api/voice/transcribe   raw body · operator token · X-Audio-Duration-Seconds
+ → Google Speech-to-Text        uz-UZ
+ → transcript into the command box   ← the operator reads and edits it
+ → Send → POST /api/agent/runs       ← unchanged
+ → SSE                               ← unchanged
+ → 🔊 the browser's own SpeechSynthesis
+```
+
+| | |
+|---|---|
+| Transcription | Google Cloud Speech-to-Text, `uz-UZ`, behind the `SpeechToText` interface |
+| Synthesis | The browser's `SpeechSynthesis`. No server provider; `/api/voice/speak` says so |
+| Containers accepted | `audio/webm`, `audio/ogg`, `audio/flac`. Safari's `audio/mp4` is refused **by name**, and the console hides the button rather than recording it |
+| Limits | `STT_MAX_BYTES` (10 MB, enforced) and `STT_MAX_SECONDS` (60, respected by the recorder and checked against a declared duration) |
+| Auth | The same operator token. Both routes joined the protected group in `api/router.py`; the existing anonymous sweep caught them without being told |
+| Storage | None. Neither endpoint takes a session or the database, and a test asserts that rather than counting rows in the tables it thought to check |
+
+What was verified, not assumed:
+
+- **The transcript does not send itself.** A control that made it auto-send
+  fails the test; so does one that offers to read a run still waiting for
+  approval, and one that treats Safari's MP4 as recordable.
+- **Removing the router guard** fails five tests, including the generic
+  anonymous sweep — the new routes were covered the moment they were added.
+- **Logging the provider exception's message instead of its type** fails the
+  leak test: an HTTP library puts the full request URL, key and all, into both
+  the message and the traceback, so the route logs the exception type alone.
+- 395 backend tests, 83 frontend tests, typecheck, lint and a production build.
+
 ## Pipeline
 
 `.github/workflows/ci.yml` on every push:
 
 | Job | What it guards |
 |---|---|
-| Backend | migrations up→down→up on PostgreSQL 16, schema drift, 375 tests, pyflakes |
-| Web Control Center | typecheck, lint, 67 tests, production build |
+| Backend | migrations up→down→up on PostgreSQL 16, schema drift, 395 tests, pyflakes |
+| Web Control Center | typecheck, lint, 83 tests, production build |
 | Deploy to Railway | default branch only; waits for `/api/health` to answer `ok`, and fails if the deployed service has no usable token |
 | Deploy the Web Control Center | default branch only; deploys `frontend` and waits for `/healthz`. If `RAILWAY_SERVICE_WEB` is ever unset it skips and prints the services the token can reach, rather than leaving the value to be guessed |
 
@@ -207,6 +243,7 @@ like themselves:
 
 | Variable | Where | Note |
 |---|---|---|
+| `STT_API_KEY` | Railway, API service | Optional. Without it the console shows no microphone and nothing else changes — the transcribe endpoint answers 503 and names the variable. A Google Cloud API key restricted to the Speech-to-Text API. |
 | `AUTH_TOKEN` | Railway, API service | Without it every route but health answers 503. The service still starts and still reports healthy, so a console pointed at it looks broken for no visible reason. Set it before deploying this branch. |
 | `NEXT_PUBLIC_API_BASE_URL` | Railway, web service | **Build-time.** Next compiles it into the browser bundle; setting it on a running container does nothing. `frontend/Dockerfile` refuses to build without it. |
 | `ANTHROPIC_WORKSPACE_ID` | Railway, API service | Must be `wrkspc_…`. An organization or account id is rejected by Anthropic mid-run. Checked before the first request; `/api/health` reports whether it could be one, never its value. |

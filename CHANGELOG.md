@@ -5,6 +5,42 @@ because a list of verbs is not worth reading later.
 
 ## Unreleased
 
+### The operator can speak to the agent
+
+Uzbek in, Uzbek out. The agent already answered in whatever language it was
+asked in — `prompts.py` has said so since the first phase — so this adds no
+language handling at all. It adds a microphone in front of the text path and a
+voice behind it.
+
+- **`POST /api/voice/transcribe`** takes the recording as a raw body, sends it
+  to Google Speech-to-Text as `uz-UZ`, and returns the text. Raw rather than
+  multipart, which would cost a dependency this service has no other use for,
+  and rather than base64, which would add a third to the size of every
+  recording on the operator's uplink.
+- **The transcript goes to the operator, not to the agent.** It lands in the
+  command box for review and waits for Send. Uzbek is low-resource and every
+  transcriber mishears it sometimes; a run started from an unreviewed
+  transcript is a run that acts on a sentence nobody said.
+- **Answers are read aloud by the browser.** `SpeechSynthesis` needs no key,
+  costs nothing and sends no audio anywhere, so `TTS_PROVIDER` defaults to
+  `browser` and `/api/voice/speak` says plainly that this service produces no
+  audio. The endpoint and the `TextToSpeech` interface exist so that adding a
+  server voice later is an adapter and a branch — Azure has real `uz-UZ` neural
+  voices — with no new route and no new path through the console.
+- **The microphone is absent, not broken, where it cannot work.** Safari
+  records MP4, which the provider cannot decode; the console checks
+  `MediaRecorder.isTypeSupported` against the containers the backend accepts
+  and shows no button rather than one that fails on every upload.
+
+Nothing about the agent, the event stream, approvals or the database changed. A
+speech outage costs the console its microphone and nothing else, and both voice
+endpoints sit behind the same operator token as everything else — the route
+sweep in `tests/test_auth.py` picked them up without being told they existed.
+
+Two guarantees are tested rather than intended: the key appears in no log, no
+error body and no health response, and neither endpoint can reach the database,
+so audio cannot be stored by either of them however they are changed later.
+
 ### Deploys stop being cancellable, and the dormant one says what it needs
 
 - **A new push no longer kills a running deploy.** The workflow cancelled any

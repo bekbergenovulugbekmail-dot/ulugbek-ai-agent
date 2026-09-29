@@ -14,6 +14,7 @@ export { memoryApi } from "./memory";
 export { projectApi, type ProjectCreate } from "./projects";
 export { taskApi } from "./tasks";
 export { toolApi } from "./tools";
+export { voiceApi, type TranscriptResponse } from "./voice";
 export {
   API_BASE_URL,
   ApiError,

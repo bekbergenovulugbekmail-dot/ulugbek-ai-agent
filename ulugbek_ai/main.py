@@ -23,6 +23,7 @@ from ulugbek_ai.config.settings import Settings, get_settings
 from ulugbek_ai.core.errors import ConfigurationError
 from ulugbek_ai.database.session import get_database, reset_database
 from ulugbek_ai.llm.claude import ClaudeClient
+from ulugbek_ai.voice.factory import build_speech_to_text
 from ulugbek_ai.observability.logger import configure_logging
 from ulugbek_ai.tools.permissions import PermissionPolicy, PermissionService
 from ulugbek_ai.tools.registry import build_default_registry
@@ -66,6 +67,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
 
     app.state.llm = build_llm_client(settings)
+    # None when no key is set. The endpoint then says which variable is
+    # missing; the rest of the service is unaffected, exactly as it is by a
+    # missing model key.
+    app.state.stt = build_speech_to_text(settings)
     app.state.registry = build_default_registry(
         permissions=PermissionService(PermissionPolicy.from_settings(settings)),
         default_timeout_seconds=settings.tool_default_timeout_seconds,
@@ -98,6 +103,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.runner.drain()
         if app.state.llm is not None:
             await app.state.llm.aclose()
+        if app.state.stt is not None:
+            await app.state.stt.aclose()
         await reset_database()
         logger.info("Shutdown complete")
 

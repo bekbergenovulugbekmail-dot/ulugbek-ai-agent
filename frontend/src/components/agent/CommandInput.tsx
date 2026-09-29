@@ -21,6 +21,9 @@ export function CommandInput({
   onProjectChange,
   placeholder = "Ask Ulugbek AI anything…",
   autoFocus = false,
+  value: controlledValue,
+  onValueChange,
+  accessory,
 }: {
   onSubmit: (message: string) => void;
   busy?: boolean;
@@ -29,8 +32,21 @@ export function CommandInput({
   onProjectChange?: (id: string | null) => void;
   placeholder?: string;
   autoFocus?: boolean;
+  /** Supply this (with `onValueChange`) to drive the box from outside. */
+  value?: string;
+  onValueChange?: (value: string) => void;
+  /** Rendered in the toolbar row — the microphone lives here. */
+  accessory?: React.ReactNode;
 }) {
-  const [value, setValue] = useState("");
+  // Uncontrolled by default, so the dashboard's copy is unchanged. Controlled
+  // when a parent needs to write into it, which is what a transcript does.
+  const [ownValue, setOwnValue] = useState("");
+  const controlled = controlledValue !== undefined;
+  const value = controlled ? controlledValue : ownValue;
+  const setValue = (next: string) => {
+    if (!controlled) setOwnValue(next);
+    onValueChange?.(next);
+  };
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -80,6 +96,7 @@ export function CommandInput({
       />
 
       <div className="flex flex-wrap items-center gap-2 px-3 pb-3 pt-1.5">
+        {accessory}
         {projects.length > 0 && onProjectChange && (
           <>
             <label htmlFor="command-project" className="sr-only">

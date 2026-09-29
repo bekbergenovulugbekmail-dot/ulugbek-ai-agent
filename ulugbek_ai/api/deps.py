@@ -29,6 +29,7 @@ from ulugbek_ai.database.session import Database, get_database
 from ulugbek_ai.events.service import EventService
 from ulugbek_ai.llm.base import LLMClient
 from ulugbek_ai.tools.registry import ToolRegistry
+from ulugbek_ai.voice.base import SpeechToText
 
 
 async def session_dependency() -> AsyncIterator[AsyncSession]:
@@ -73,6 +74,27 @@ def llm_dependency(request: Request) -> LLMClient:
             "restart the application."
         )
     return client
+
+
+def speech_to_text_dependency(request: Request) -> SpeechToText:
+    """The shared transcription provider created during application startup.
+
+    Missing is a configuration problem, not an authentication one, so this
+    raises 503 and names the variable. It resolves *after* the router-level
+    guard, so an anonymous caller is refused before ever learning that much.
+    """
+    stt: SpeechToText | None = getattr(request.app.state, "stt", None)
+    if stt is None:
+        settings: Settings | None = getattr(request.app.state, "settings", None)
+        if settings is not None and settings.stt_provider == "disabled":
+            raise ConfigurationError(
+                "Speech is switched off: STT_PROVIDER is 'disabled'."
+            )
+        raise ConfigurationError(
+            "Speech-to-text is not configured. Set STT_API_KEY and restart the "
+            "application."
+        )
+    return stt
 
 
 def registry_dependency(request: Request) -> ToolRegistry:
@@ -158,6 +180,7 @@ SettingsDep = Annotated[Settings, Depends(settings_dependency)]
 LLMDep = Annotated[LLMClient, Depends(llm_dependency)]
 RegistryDep = Annotated[ToolRegistry, Depends(registry_dependency)]
 PrincipalDep = Annotated[Principal, Depends(require_principal)]
+SpeechToTextDep = Annotated[SpeechToText, Depends(speech_to_text_dependency)]
 
 
 def engine_dependency(

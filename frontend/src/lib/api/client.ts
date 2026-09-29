@@ -114,6 +114,20 @@ export interface RequestOptions {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   query?: QueryParams;
   body?: unknown;
+  /**
+   * A body sent as-is, with `contentType`, instead of JSON.
+   *
+   * Audio is the reason this exists: base64 inside JSON would add a third to
+   * the size of every recording on the operator's uplink, and multipart would
+   * cost the backend a dependency it has no other use for. Everything else —
+   * the base URL, the credential, the timeout, the 401 handling — is shared.
+   */
+  rawBody?: BodyInit;
+  contentType?: string;
+  /** Return the response body untouched rather than parsing it as JSON. */
+  responseType?: "json" | "blob";
+  /** Extra request headers. The credential is added separately, and wins. */
+  headers?: Record<string, string>;
   signal?: AbortSignal;
   timeoutMs?: number;
 }
@@ -173,6 +187,10 @@ export async function request<T>(
     method = "GET",
     query,
     body,
+    rawBody,
+    contentType,
+    responseType = "json",
+    headers: extraHeaders,
     signal,
     timeoutMs = DEFAULT_TIMEOUT_MS,
   } = options;
@@ -185,8 +203,12 @@ export async function request<T>(
     else signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
-  const headers: Record<string, string> = { Accept: "application/json" };
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    ...extraHeaders,
+  };
   if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (rawBody !== undefined && contentType) headers["Content-Type"] = contentType;
   const token = authTokenProvider();
   if (token) headers.Authorization = `Bearer ${token}`;
 
@@ -195,7 +217,12 @@ export async function request<T>(
     response = await fetch(apiUrl(path, query), {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body:
+        rawBody !== undefined
+          ? rawBody
+          : body === undefined
+            ? undefined
+            : JSON.stringify(body),
       signal: controller.signal,
       cache: "no-store",
     });
@@ -218,5 +245,6 @@ export async function request<T>(
   }
   if (!response.ok) throw await parseError(response);
   if (response.status === 204) return undefined as T;
+  if (responseType === "blob") return (await response.blob()) as T;
   return (await response.json()) as T;
 }

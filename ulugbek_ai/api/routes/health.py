@@ -76,6 +76,22 @@ async def health(
             if settings.auth_token
             else None
         ),
+        # Voice, reported the same way as everything else: whether it could
+        # work, never what it was configured with. A console whose microphone
+        # does nothing is otherwise indistinguishable from a broken browser.
+        "stt": {
+            "configured": settings.stt_api_key is not None,
+            "usable": (
+                settings.stt_provider != "disabled"
+                and settings.stt_api_key is not None
+            ),
+        },
+        "tts": {
+            # The browser voice needs nothing from this service, so from here
+            # it is correctly reported as not configured: no server audio.
+            "configured": False,
+            "usable": False,
+        },
         "tools": {"count": len(registry.list())},
     }
 

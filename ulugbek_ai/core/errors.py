@@ -95,6 +95,38 @@ class ToolTimeoutError(ToolError):
     http_status = 504
 
 
+# --- Speech -------------------------------------------------------------- #
+class SpeechError(UlugbekError):
+    """A speech provider failed. 502, like the model: theirs, not ours."""
+
+    code = "speech_error"
+    http_status = 502
+
+
+class SpeechTimeoutError(SpeechError):
+    code = "speech_timeout"
+    http_status = 504
+
+
+class PayloadTooLargeError(UlugbekError):
+    """The request body exceeds a limit this server set.
+
+    Separate from :class:`ValidationError` because the fix is different: the
+    body is not malformed, there is simply too much of it, and 413 is the one
+    status a client can act on without reading the message.
+    """
+
+    code = "payload_too_large"
+    http_status = 413
+
+
+class UnsupportedMediaTypeError(UlugbekError):
+    """The body is in a container this server cannot pass on."""
+
+    code = "unsupported_media_type"
+    http_status = 415
+
+
 # --- Permissions / approvals ----------------------------------------------- #
 class AuthenticationError(UlugbekError):
     """The caller did not prove who they are.

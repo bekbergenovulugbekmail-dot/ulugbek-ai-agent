@@ -274,6 +274,7 @@ committed.** Secrets are read from the environment only.
 
 | Variable | Description |
 |---|---|
+| `STT_API_KEY` | Optional. A Google Cloud API key restricted to the Speech-to-Text API. Without it the console's microphone is absent and nothing else changes. |
 | `AUTH_TOKEN` | The operator's token, at least 32 characters. Without it every protected route answers 503 and names this variable — refusing everyone is the only safe reading of "no token was set". Generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
 | `ANTHROPIC_API_KEY` | Claude API key. Without it the service still starts and serves every non-agent endpoint; `/api/agent/run` returns a clear configuration error. If the key spans several workspaces, also set `ANTHROPIC_WORKSPACE_ID` — otherwise every request is rejected with a 400. |
 | `DATABASE_URL` | PostgreSQL URL. `postgres://` and `postgresql://` are upgraded to `postgresql+asyncpg://` automatically, so Railway's injected value works unchanged. |
@@ -559,6 +560,8 @@ reading the stream and expires on its own — nothing stores it.
 | `POST` | `/api/events/stream-token` | Mint a short-lived token for the stream |
 | `GET` | `/api/events/runs/{id}/stream` | **Live event stream (SSE)** — takes that token |
 | `GET` | `/api/events/state` | The agent's current phase |
+| `POST` | `/api/voice/transcribe` | Turn a recording into text |
+| `POST` | `/api/voice/speak` | Server-side synthesis (no provider configured) |
 | `GET` | `/api/tools` | The tool registry |
 | `GET` | `/api/tools/executions` | Tool execution history |
 | `GET` | `/api/system/overview` | Dashboard counters, health and agent state |
@@ -609,6 +612,56 @@ Who decided is **not** in the body. A caller that names the decider is a caller
 that can name someone else, and an approval record is only worth keeping if it
 says who actually made the call — so the server writes the authenticated
 principal and ignores any claim to the contrary.
+
+---
+
+## Voice
+
+The operator speaks; the agent answers in writing and, on request, aloud.
+
+```
+🎤  MediaRecorder            audio/webm;codecs=opus
+ ↓  POST /api/voice/transcribe   raw body, operator token
+ ↓  Google Speech-to-Text        uz-UZ
+ ↓  transcript → the command box     ← the operator reads it and edits it
+ ↓  Send  →  POST /api/agent/runs    ← unchanged
+ ↓  SSE                              ← unchanged
+ 🔊 the browser's own SpeechSynthesis
+```
+
+**The transcript is never sent automatically.** Uzbek is a low-resource
+language and every transcriber mishears it sometimes; a run started from an
+unreviewed transcript is a run that acts on a sentence nobody said. The text
+lands in the command box and waits for Send — the same box, the same button and
+the same endpoint as a typed command.
+
+**Nothing about the agent changes.** Voice is a shell around the text path:
+audio becomes text before a run starts and an answer becomes sound after one
+finishes. A speech outage costs the console its microphone and nothing else.
+
+**The key stays on the server.** The browser posts the recording to this
+service, which holds `STT_API_KEY` and calls the provider. Every
+`NEXT_PUBLIC_*` value is compiled into the browser bundle, so there is no
+version of this where a key lives in the console.
+
+**Audio is never stored.** It arrives as a request body, goes to the provider,
+and is gone when the request ends. Neither voice endpoint can reach the
+database — a test asserts that, because the guarantee is worth more than the
+intention.
+
+### What the browser has to supply
+
+`MediaRecorder` produces whatever the browser prefers: Opus in WebM on Chrome,
+Firefox and Edge; AAC in MP4 on Safari. Google's API reads the first and not
+the second, so the console picks a container it knows the backend accepts and
+**hides the microphone button entirely** where none is available. A button that
+records perfectly and fails on every upload is worse than no button.
+
+Reading aloud uses the browser's `SpeechSynthesis` — free, keyless, and offline.
+Many machines have no Uzbek voice installed and will read Uzbek Latin text with
+whatever voice they have. `TextToSpeech` in `ulugbek_ai/voice/base.py` is where
+a server voice would go; Azure has genuine `uz-UZ` neural voices, and adding
+one is an adapter and a branch, with no new route and no new frontend path.
 
 ---
 

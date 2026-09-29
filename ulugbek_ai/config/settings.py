@@ -96,6 +96,31 @@ class Settings(BaseSettings):
     #: reporting what it saw. Longer than this is reported as still running.
     railway_deploy_wait_seconds: Annotated[float, Field(ge=0, le=300)] = 90.0
 
+    # --- Speech (voice in, voice out) -------------------------------------- #
+    #: Which transcription provider to use. ``disabled`` turns the microphone
+    #: off in the console without removing the endpoint.
+    stt_provider: Literal["google", "disabled"] = "google"
+    #: Read from the environment only; never written to a log, an audit row or
+    #: an API response. The browser never sees it: it talks to this service,
+    #: and this service talks to the provider.
+    stt_api_key: SecretStr | None = None
+    stt_api_url: str = "https://speech.googleapis.com/v1/speech:recognize"
+    #: BCP-47. Uzbek in the Latin script, which is what the console displays.
+    stt_language: str = "uz-UZ"
+    #: The real guard. A body larger than this is refused before a provider is
+    #: called, so a runaway recorder cannot spend money or memory.
+    stt_max_bytes: Annotated[int, Field(ge=1024, le=100 * 1024 * 1024)] = 10 * 1024 * 1024
+    #: What the recorder is asked to respect, and what an honest client's
+    #: declared duration is checked against. Bytes remain the enforced limit,
+    #: because a header can say anything.
+    stt_max_seconds: Annotated[float, Field(gt=0, le=600)] = 60.0
+    stt_timeout_seconds: Annotated[float, Field(gt=0)] = 30.0
+
+    #: ``browser`` means the console speaks through the browser's own
+    #: ``SpeechSynthesis``: no key, no cost, no audio crossing the network. A
+    #: server-side voice would be a second adapter behind ``TextToSpeech``.
+    tts_provider: Literal["browser", "disabled"] = "browser"
+
     # --- Agent loop -------------------------------------------------------- #
     agent_max_iterations: Annotated[int, Field(ge=1, le=100)] = 12
     agent_max_replans: Annotated[int, Field(ge=0, le=20)] = 2
@@ -124,6 +149,7 @@ class Settings(BaseSettings):
         "auth_token",
         "github_token",
         "railway_token",
+        "stt_api_key",
         mode="before",
     )
     @classmethod

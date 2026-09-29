@@ -31,6 +31,7 @@ from ulugbek_ai.api.routes import (
     system,
     tasks,
     tools,
+    voice,
 )
 
 #: Every protected router is included with this.
@@ -51,6 +52,7 @@ for _protected in (
     events.router,
     tools.router,
     system.router,
+    voice.router,
 ):
     api_router.include_router(_protected, dependencies=_OPERATOR_ONLY)
 
