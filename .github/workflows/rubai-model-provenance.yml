@@ -1,0 +1,96 @@
+# What exactly are we about to ship?
+#
+# The speech model is a 500 MB binary from a community account. Pinning it by
+# name is not pinning: a tag moves, a file is replaced, and the next build runs
+# different weights with the same Dockerfile. This job answers the questions a
+# pin has to be built from — which commit, which file, what size, what hash,
+# under what licence — and prints them for the Dockerfile and the docs.
+#
+# Run it by hand, once per model change. Nothing deploys from it.
+
+name: Rubai model provenance
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Hugging Face repo holding the GGML conversion"
+        required: true
+        default: "azimxxm/rubaistt-v2-medium-ggml"
+      base_repo:
+        description: "The model it was converted from"
+        required: true
+        default: "islomov/rubaistt_v2_medium"
+
+permissions:
+  contents: read
+
+jobs:
+  provenance:
+    name: Identify and hash the model
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: What the repositories say about themselves
+        env:
+          REPO: ${{ inputs.repo }}
+          BASE: ${{ inputs.base_repo }}
+        run: |
+          for name in "$BASE" "$REPO"; do
+            echo "=============================================================="
+            echo "https://huggingface.co/$name"
+            curl -fsS --max-time 30 "https://huggingface.co/api/models/$name" -o /tmp/model.json || {
+              echo "  could not be read"; continue; }
+            python3 - <<'EOF'
+          import json
+          d = json.load(open("/tmp/model.json"))
+          print("  sha (current commit):", d.get("sha"))
+          print("  lastModified        :", d.get("lastModified"))
+          print("  licence             :", (d.get("cardData") or {}).get("license"))
+          print("  pipeline            :", d.get("pipeline_tag"))
+          print("  files:")
+          for f in d.get("siblings") or []:
+              print("   ", f.get("rfilename"))
+          EOF
+          done
+
+      - name: Download the GGML weights and hash them
+        env:
+          REPO: ${{ inputs.repo }}
+        run: |
+          # Every .bin in the repo, at the commit reported above. Hashing what
+          # was actually fetched is the only hash worth writing down.
+          sha=$(curl -fsS "https://huggingface.co/api/models/$REPO" | python3 -c "import json,sys;print(json.load(sys.stdin)['sha'])")
+          files=$(curl -fsS "https://huggingface.co/api/models/$REPO" | python3 -c "
+          import json,sys
+          for f in json.load(sys.stdin).get('siblings') or []:
+              name = f.get('rfilename','')
+              if name.endswith('.bin'):
+                  print(name)")
+          echo "commit: $sha"
+          echo
+          for file in $files; do
+            echo "--- $file"
+            curl -fsSL --max-time 900 \
+              "https://huggingface.co/$REPO/resolve/$sha/$file" -o /tmp/model.bin
+            echo "  bytes : $(stat -c%s /tmp/model.bin)"
+            echo "  sha256: $(sha256sum /tmp/model.bin | cut -d' ' -f1)"
+            # ggml files start with a magic number; a stray HTML error page does not.
+            echo "  magic : $(head -c4 /tmp/model.bin | xxd -p)"
+            rm -f /tmp/model.bin
+          done
+          echo
+          echo "Pin the commit, the filename and the sha256 in"
+          echo "services/rubai-stt/Dockerfile and docs/RUBAI_STT.md."
+
+      - name: The licence files, verbatim
+        env:
+          REPO: ${{ inputs.repo }}
+          BASE: ${{ inputs.base_repo }}
+        run: |
+          for name in "$BASE" "$REPO"; do
+            echo "=== $name README header ==="
+            curl -fsSL --max-time 60 "https://huggingface.co/$name/raw/main/README.md" \
+              -o /tmp/card.md && sed -n '1,30p' /tmp/card.md || echo "  (no README)"
+            echo
+          done
