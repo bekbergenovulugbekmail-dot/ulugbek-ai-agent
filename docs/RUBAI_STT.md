@@ -31,6 +31,31 @@ thing listening on a port anyone can reach is the guard in front of it.
 
 ---
 
+## What this cannot do
+
+Two limits, stated here rather than left to be discovered from a transcript
+that looks fine and is not.
+
+**A pause of about fifteen seconds in the middle of a recording loses
+everything after it.** Measured: a 37-second sample built as speech, fifteen
+seconds of silence, speech returned only the first half — under the default
+`auto` window and under the full window alike (run 36566943407). Three seconds
+of pause is fine; the same sample with a three-second gap returned both halves.
+This is whisper's own segment handling, it predates the window work and is
+unchanged by it. Turning VAD on does fix this one case and loses more elsewhere
+— three sentences out of five on a 55-second sample — so it stays off.
+
+For an operator that means: **do not stop and think for a quarter of a minute
+mid-recording.** Stop the recording, send it, and start another. There is no
+warning when this happens — the request succeeds and the transcript simply ends
+early — so the only defence is reading the transcript before pressing Send,
+which the console already requires.
+
+**Silence transcribes as the word `musiqa`.** A recording with no speech in it
+does not come back empty. Unchanged by any of this work and not fixed here.
+
+---
+
 ## Provenance
 
 The weights are a binary from a community account, so they are pinned by
@@ -242,6 +267,16 @@ STT_MAX_SECONDS=60
 STT_TIMEOUT_SECONDS=60
 ```
 
+**`STT_TIMEOUT_SECONDS` and `STT_MAX_SECONDS` are both 60, and that is not a
+safe pair on a four-vCPU box.** A 55-second recording was measured at 59,870 ms
+end to end (run 36566943407) — 130 ms inside a 60-second client timeout — and
+`STT_MAX_SECONDS=60` accepts one longer still. The speech service keeps working
+for its own 120-second budget while the API has already given up, so the
+operator sees a 504 and the CPU is spent anyway. Either raise
+`STT_TIMEOUT_SECONDS` to about 150 so it sits above the service's own limit, or
+lower `STT_MAX_SECONDS` to what comfortably finishes on the container being
+deployed to. The pairing has not been measured on Railway hardware.
+
 On the **speech** service:
 
 ```
@@ -289,7 +324,7 @@ into the bundle — so there is no version of this where a token lives there.
 
 ## Testing
 
-- `services/rubai-stt/tests/` — 18 tests covering the guard, with no model and
+- `services/rubai-stt/tests/` — 34 tests covering the guard, with no model and
   no ffmpeg, so they run in a second on every push.
 - `tests/test_voice_rubai.py` — the API's adapter against every way the service
   can fail: absent, timing out, still loading, refusing the token, returning
