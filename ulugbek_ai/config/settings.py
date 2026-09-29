@@ -97,12 +97,21 @@ class Settings(BaseSettings):
     railway_deploy_wait_seconds: Annotated[float, Field(ge=0, le=300)] = 90.0
 
     # --- Speech (voice in, voice out) -------------------------------------- #
-    #: Which transcription provider to use. ``disabled`` turns the microphone
-    #: off in the console without removing the endpoint.
-    stt_provider: Literal["google", "disabled"] = "google"
-    #: Read from the environment only; never written to a log, an audit row or
-    #: an API response. The browser never sees it: it talks to this service,
-    #: and this service talks to the provider.
+    #: Which transcription provider to use. ``rubai`` is this project's own
+    #: speech service: whisper.cpp holding an Uzbek fine-tune, deployed beside
+    #: the API. ``disabled`` turns the microphone off without removing the
+    #: endpoint.
+    stt_provider: Literal["rubai", "google", "disabled"] = "rubai"
+    #: Where that service listens. On Railway this is the private address —
+    #: http://rubai-stt.railway.internal:8080 — so the model is never exposed
+    #: to the internet at all.
+    stt_service_url: str | None = None
+    #: Shared with the speech service. Read from the environment only; never
+    #: written to a log, an audit row or an API response.
+    stt_service_token: SecretStr | None = None
+    #: Google Cloud, kept as an alternative. Read from the environment only.
+    #: The browser never sees either credential: it talks to this service, and
+    #: this service talks to the provider.
     stt_api_key: SecretStr | None = None
     stt_api_url: str = "https://speech.googleapis.com/v1/speech:recognize"
     #: BCP-47. Uzbek in the Latin script, which is what the console displays.
@@ -114,7 +123,9 @@ class Settings(BaseSettings):
     #: declared duration is checked against. Bytes remain the enforced limit,
     #: because a header can say anything.
     stt_max_seconds: Annotated[float, Field(gt=0, le=600)] = 60.0
-    stt_timeout_seconds: Annotated[float, Field(gt=0)] = 30.0
+    #: A first request after a restart waits for a 514 MiB model to load, so
+    #: this is longer than a cloud provider would need.
+    stt_timeout_seconds: Annotated[float, Field(gt=0)] = 60.0
 
     #: ``browser`` means the console speaks through the browser's own
     #: ``SpeechSynthesis``: no key, no cost, no audio crossing the network. A
@@ -150,6 +161,7 @@ class Settings(BaseSettings):
         "github_token",
         "railway_token",
         "stt_api_key",
+        "stt_service_token",
         mode="before",
     )
     @classmethod

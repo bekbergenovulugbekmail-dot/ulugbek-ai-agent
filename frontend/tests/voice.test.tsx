@@ -108,11 +108,23 @@ describe("the recorder", () => {
     expect(isRecordingSupported()).toBe(true);
   });
 
-  it("reports no microphone rather than recording something unusable", () => {
-    // Safari records audio/mp4, which the configured provider cannot decode.
-    // Offering the button anyway would produce a 415 after every recording.
+  it("takes Safari's container rather than refusing it", () => {
+    // The speech service converts with ffmpeg before the model sees anything,
+    // so audio/mp4 is no longer the dead end it was under a cloud API.
     stubMicrophone();
     FakeMediaRecorder.supported = new Set(["audio/mp4"]);
+
+    expect(supportedMimeType()).toBe("audio/mp4");
+    expect(isRecordingSupported()).toBe(true);
+
+    FakeMediaRecorder.supported = new Set(["audio/webm;codecs=opus", "audio/webm"]);
+  });
+
+  it("reports no microphone rather than recording something unusable", () => {
+    // A container nothing in the chain can decode: no button, rather than one
+    // that records perfectly and fails on every upload.
+    stubMicrophone();
+    FakeMediaRecorder.supported = new Set(["audio/amr-wb", "video/x-matroska"]);
 
     expect(supportedMimeType()).toBeNull();
     expect(isRecordingSupported()).toBe(false);

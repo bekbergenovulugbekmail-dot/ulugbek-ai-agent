@@ -6,21 +6,28 @@
  * The hard part is not recording — it is recording something the backend's
  * transcription provider can actually read. `MediaRecorder` produces whatever
  * the browser prefers: Opus in a WebM container on Chrome, Firefox and Edge,
- * AAC in MP4 on Safari. Google's speech API reads the first and not the
- * second, so the container is chosen here and declared to the server rather
- * than discovered by it.
+ * AAC in MP4 on Safari. The speech service converts with ffmpeg before the
+ * model sees anything, so both work; the container is still chosen here and
+ * declared to the server rather than left for it to guess.
  *
  * When nothing suitable is available the microphone is reported as absent.
  * Offering a button that records perfectly and then fails on every upload is
  * worse than offering no button at all.
  */
 
-/** In order of preference. Every entry is a container the backend accepts. */
+/**
+ * In order of preference. Every entry is a container the backend accepts.
+ *
+ * Opus first because it is the smallest thing to send over a phone uplink, and
+ * MP4 last because only Safari produces it — but it is on the list, so Safari
+ * gets a microphone rather than an explanation.
+ */
 export const PREFERRED_MIME_TYPES = [
   "audio/webm;codecs=opus",
   "audio/webm",
   "audio/ogg;codecs=opus",
   "audio/ogg",
+  "audio/mp4",
 ] as const;
 
 export interface Clip {

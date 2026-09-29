@@ -40,6 +40,27 @@ def _auth_report(token: str | None) -> dict[str, Any]:
     }
 
 
+def _stt_report(settings: Any) -> dict[str, Any]:
+    """Whether speech could work, and through which provider.
+
+    The provider name is not a secret and is the first thing anyone debugging a
+    silent microphone needs. The URL and the token are not reported: one names
+    an internal host and the other is a credential.
+    """
+    provider = settings.stt_provider
+    if provider == "rubai":
+        configured = bool(settings.stt_service_url)
+    elif provider == "google":
+        configured = settings.stt_api_key is not None
+    else:
+        configured = False
+    return {
+        "provider": provider,
+        "configured": configured,
+        "usable": configured and provider != "disabled",
+    }
+
+
 @router.get("/health", summary="Liveness and dependency check")
 async def health(
     session: SessionDep, settings: SettingsDep, registry: RegistryDep
@@ -79,13 +100,7 @@ async def health(
         # Voice, reported the same way as everything else: whether it could
         # work, never what it was configured with. A console whose microphone
         # does nothing is otherwise indistinguishable from a broken browser.
-        "stt": {
-            "configured": settings.stt_api_key is not None,
-            "usable": (
-                settings.stt_provider != "disabled"
-                and settings.stt_api_key is not None
-            ),
-        },
+        "stt": _stt_report(settings),
         "tts": {
             # The browser voice needs nothing from this service, so from here
             # it is correctly reported as not configured: no server audio.

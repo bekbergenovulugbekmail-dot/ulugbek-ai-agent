@@ -12,6 +12,7 @@ import logging
 from ulugbek_ai.config.settings import Settings
 from ulugbek_ai.voice.base import SpeechToText
 from ulugbek_ai.voice.google import GoogleSpeechToText
+from ulugbek_ai.voice.rubai import RubaiSpeechToText
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,23 @@ def build_speech_to_text(settings: Settings) -> SpeechToText | None:
     """
     if settings.stt_provider == "disabled":
         return None
+
+    if settings.stt_provider == "rubai":
+        if not settings.stt_service_url:
+            return None
+        logger.info(
+            "Speech-to-text: rubai (%s, %s)",
+            settings.stt_language,
+            # The host, never the token. A URL with a credential in it would
+            # not survive this line.
+            settings.stt_service_url.split("://", 1)[-1].split("/", 1)[0],
+        )
+        return RubaiSpeechToText(
+            settings.stt_service_url,
+            token=settings.stt_service_token,
+            timeout_seconds=settings.stt_timeout_seconds,
+        )
+
     if settings.stt_api_key is None:
         return None
 

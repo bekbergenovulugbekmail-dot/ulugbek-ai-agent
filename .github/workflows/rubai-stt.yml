@@ -1,0 +1,147 @@
+# Does the speech service actually work, and what does it cost?
+#
+# Nothing about a 514 MiB model can be checked from a laptop that cannot reach
+# Hugging Face, and nothing about its latency can be guessed from a vendor page.
+# This builds the image for real, starts it, and measures it — the numbers in
+# docs/RUBAI_STT.md come from here and nowhere else.
+#
+# Separate from CI so the agent's own pipeline is never held up by a ten-minute
+# model build.
+
+name: Rubai STT service
+
+on:
+  push:
+    paths:
+      - "services/rubai-stt/**"
+      - ".github/workflows/rubai-stt.yml"
+  pull_request:
+    paths:
+      - "services/rubai-stt/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: The service's own tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/rubai-stt
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install -r requirements.txt pytest
+
+      # No model, no ffmpeg, seconds to run: the guard in front of the model is
+      # what these cover, and it is the part that changes.
+      - name: Tests
+        run: python -m pytest tests/ -q
+
+  measure:
+    name: Build, run and measure
+    runs-on: ubuntu-latest
+    # The build downloads half a gigabyte and compiles whisper.cpp.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the image
+        run: |
+          df -h / | tail -1
+          time docker build -t rubai-stt:ci services/rubai-stt
+          echo
+          echo "image size:"
+          docker image inspect rubai-stt:ci --format '{{.Size}}' \
+            | awk '{printf "  %.0f MB\n", $1/1024/1024}'
+
+      - name: Start it
+        run: |
+          docker run -d --name rubai \
+            -e STT_SERVICE_TOKEN=ci-token-not-a-real-credential \
+            -e PORT=8080 \
+            -p 8080:8080 \
+            rubai-stt:ci
+          echo "waiting for the model to load"
+          start=$(date +%s)
+          for attempt in $(seq 1 90); do
+            code=$(curl -sS -o /tmp/health.json -w '%{http_code}' \
+                   http://127.0.0.1:8080/health || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "ready after $(( $(date +%s) - start ))s"
+              cat /tmp/health.json; echo
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error title=Model never became ready::/health stayed non-200."
+          docker logs rubai | tail -50
+          exit 1
+
+      - name: It refuses a caller without the token
+        run: |
+          # The one property that matters if this service is ever reachable.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                 -F "file=@/dev/null" http://127.0.0.1:8080/inference || echo 000)
+          echo "no token -> HTTP $code"
+          [ "$code" = "401" ] || { echo "::error::expected 401"; exit 1; }
+
+      - name: Transcribe, and time it
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg jq
+          # Real speech, in English: this proves the pipeline end to end —
+          # upload, ffmpeg, whisper, JSON back. It says nothing about Uzbek
+          # accuracy, which needs real Uzbek recordings and is measured
+          # separately in docs/RUBAI_STT_BENCHMARK.md.
+          curl -fsSL -o /tmp/jfk.wav \
+            https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav
+          ffmpeg -loglevel error -i /tmp/jfk.wav -c:a libopus -f webm /tmp/jfk.webm -y
+          ffmpeg -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono -t 5 /tmp/5s.wav -y
+          ffmpeg -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono -t 30 /tmp/30s.wav -y
+
+          measure() {
+            name=$1; file=$2
+            start=$(date +%s%3N)
+            code=$(curl -sS -o /tmp/out.json -w '%{http_code}' \
+                   -H "Authorization: Bearer ci-token-not-a-real-credential" \
+                   -F "file=@$file" http://127.0.0.1:8080/inference || echo 000)
+            elapsed=$(( $(date +%s%3N) - start ))
+            echo "  $name: HTTP $code in ${elapsed}ms"
+            if [ "$code" = "200" ]; then
+              echo "    text: $(jq -r '.text' /tmp/out.json | head -c 160)"
+              echo "    service-measured: $(jq -r '.latency_ms' /tmp/out.json)ms"
+            else
+              cat /tmp/out.json; echo
+              echo "::error title=Transcription failed::$name answered HTTP $code"
+              exit 1
+            fi
+          }
+
+          echo "Latency (whisper pads every clip to 30s, so short audio is not cheap):"
+          measure "jfk.wav  (11s speech)" /tmp/jfk.wav
+          measure "jfk.webm (opus, what a browser sends)" /tmp/jfk.webm
+          measure "silence  (5s)" /tmp/5s.wav
+          measure "silence  (30s)" /tmp/30s.wav
+
+      - name: What it costs to keep running
+        if: always()
+        run: |
+          echo "runner: $(nproc) vCPU, $(free -m | awk '/Mem:/{print $2}') MB RAM"
+          docker stats --no-stream --format \
+            "  memory: {{.MemUsage}}   cpu: {{.CPUPerc}}" rubai || true
+
+      - name: Logs, if anything went wrong
+        if: failure()
+        run: docker logs rubai | tail -80
+
+      - name: Stop
+        if: always()
+        run: docker rm -f rubai || true

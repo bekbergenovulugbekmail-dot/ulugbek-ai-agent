@@ -411,7 +411,11 @@ async def test_health_reports_speech_configuration_without_revealing_it(
 ) -> None:
     body = (await anonymous_client.get("/api/health")).json()
 
-    assert body["stt"] == {"configured": False, "usable": False}
+    assert body["stt"] == {
+        "provider": "rubai",
+        "configured": False,
+        "usable": False,
+    }
     assert body["tts"] == {"configured": False, "usable": False}
 
 
@@ -422,7 +426,13 @@ async def test_health_reports_speech_as_usable_once_configured(
     body = response.json()
 
     assert response.status_code == 200
-    assert body["stt"] == {"configured": True, "usable": True}
+    assert body["stt"] == {
+        "provider": "google",
+        "configured": True,
+        "usable": True,
+    }
+    # The provider's name is not a secret and is the first thing anyone
+    # debugging a silent microphone needs. Its credential is neither.
     assert "test-stt-key-not-a-real-credential" not in response.text
 
 
