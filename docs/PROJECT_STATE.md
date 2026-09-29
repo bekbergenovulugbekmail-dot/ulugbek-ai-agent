@@ -174,6 +174,13 @@ the same service at the same time; the later one waits rather than racing.
 deploys.** Both paths work alone; with both on, every push deploys twice and
 the two races decide which image ends up live.
 
+Verified on CI run 36546729076 (2026-09-29): Backend, Web Control Center and
+Deploy to Railway all green — the API deployed and `/api/health` answered
+`status: ok` with `auth.usable: true` — and the web deploy skipped as designed,
+after printing the project's services: `Postgres`, `frontend`,
+`ulugbek-ai-agent`. So the value `RAILWAY_SERVICE_WEB` needs is `frontend`, and
+it came from the token's own view of the project rather than from a guess.
+
 `.github/workflows/deployment-check.yml` is manual: it looks at production the
 way a browser does — the API URL compiled into the deployed bundle, the CORS
 headers the backend returns to the console's origin, and optionally one real

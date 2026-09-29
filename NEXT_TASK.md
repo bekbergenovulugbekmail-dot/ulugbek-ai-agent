@@ -13,16 +13,30 @@ dormant — prints the names of the services the Railway token can reach, so
 there is nothing to guess. What is left is outside the repository:
 
 1. **Settings → Secrets and variables → Actions → Variables**: add
-   `RAILWAY_SERVICE_WEB` (the web service's name, as the skipped job prints it)
-   and `RAILWAY_WEB_HEALTHCHECK_URL`
-   (`https://<your-web>.up.railway.app/healthz`).
-2. **Railway → the web service → Settings**: turn its GitHub integration off.
-   Both deploy paths work alone; with both on, every push deploys twice and the
-   two races decide which image ends up live.
+   `RAILWAY_SERVICE_WEB` = `frontend`, and `RAILWAY_WEB_HEALTHCHECK_URL` =
+   `https://frontend-production-b432.up.railway.app/healthz`.
+
+   `frontend` is not a guess: CI run 36546729076 asked Railway with the token
+   the repository already holds, and the project's services are `Postgres`,
+   `frontend` and `ulugbek-ai-agent`.
+2. **Railway → the `frontend` service → Settings**: turn its GitHub integration
+   off. Both deploy paths work alone; with both on, every push deploys twice
+   and the two races decide which image ends up live.
 
 Do them in that order and the next default-branch push deploys the console
 through CI, which is the path that refuses to call a deploy done before the
 service answers.
+
+**One unknown, and it fails loudly rather than quietly.** The job runs
+`railway up` from `frontend/`, so the upload has `Dockerfile` and
+`railway.json` at its top level. If the Railway service also has its Root
+Directory set to `frontend`, it may look for `frontend/frontend/…` inside that
+upload and the build will fail — which is the point: `--ci` fails the job on a
+failed build, and the `/healthz` wait fails it on a wrong image. If the first
+CI web deploy fails that way, the fix is to clear the service's Root Directory
+(the CLI already uploads the right folder) or to upload from the repository
+root instead. This cannot be settled without running it, and running it needs
+step 1.
 
 ## 2. Watch production rather than visiting it
 
