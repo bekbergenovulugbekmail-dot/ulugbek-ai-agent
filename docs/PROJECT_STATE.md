@@ -14,9 +14,25 @@ command or a run behind it.
 |---|---|---|
 | API | <https://ulugbek-ai-agent-production.up.railway.app> | `/api/health` returns `status: ok` |
 | Web Control Center | <https://frontend-production-b432.up.railway.app> | `/healthz` returns `status: ok` |
+| Speech service (`rubai-stt`) | *no public URL, by design* | Railway reports the service Online |
 
-Both run on Railway as separate services from this one repository: the API
-builds the root `Dockerfile`, the console builds `frontend/Dockerfile`.
+All three run on Railway as separate services from this one repository: the API
+builds the root `Dockerfile`, the console builds `frontend/Dockerfile`, and the
+speech service builds `services/rubai-stt/Dockerfile` (deployed by
+`.github/workflows/rubai-stt.yml`, run 36589310681, 18m12s).
+
+**The speech service has no public domain and is not meant to get one.** It is
+reached at `http://rubai-stt.railway.internal:8080` by the API and by nothing
+else, which is the whole of its security argument — it holds a model anyone
+could spend CPU on. That also means nothing outside Railway can probe it:
+"Online" is the evidence, and it is worth something because `railway.json`
+points Railway's healthcheck at `/health`, which stays 503 until the model has
+loaded *and* completed one warm-up transcription. A container that cannot load
+its weights never goes Online.
+
+What has **not** happened yet: no recording has been transcribed in
+production. The API reports `stt.usable: true`, which means it holds a provider,
+a URL and a token — not that the two services have spoken to each other.
 
 Current production health, as the deployed build reports it (deployment check
 run 36542604824, 2026-09-29 08:25 UTC):
