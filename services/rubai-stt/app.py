@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -51,6 +52,7 @@ BYTES_PER_SECOND: Final[int] = SAMPLE_RATE * 2
 #: by exactly that ratio — and audio past the end of it is not transcribed
 #: badly, it is not transcribed at all.
 ENCODER_POSITIONS_PER_SECOND: Final[int] = 50
+ENCODER_POSITIONS_MAX: Final[int] = 1500
 
 
 def window_seconds(audio_ctx: int) -> float:
@@ -58,11 +60,49 @@ def window_seconds(audio_ctx: int) -> float:
     return 30.0 if audio_ctx <= 0 else audio_ctx / ENCODER_POSITIONS_PER_SECOND
 
 
+def encoder_context_for(
+    duration_seconds: float, *, headroom: float, floor: int
+) -> int:
+    """An encoder window sized to this recording. 0 means the full 1500.
+
+    The measured saving from a shorter window was about half the wall time, and
+    its measured cost was that audio past the window is not heard at all. Both
+    facts point at the same answer: make the window fit the audio instead of
+    picking one number for every recording.
+
+    A two-second command then gets a far smaller window than a fixed 768 would
+    have given it, and a twenty-two second one gets a window wide enough to
+    reach its end — which is the case a fixed 768 got wrong.
+
+    `headroom` is slack past the audio, because a window that ends exactly at
+    the last syllable is a window that may clip it. Anything needing the full
+    1500 gets 0, which lets whisper use its own default path rather than a
+    number that happens to equal it.
+    """
+    if duration_seconds <= 0:
+        return 0
+    needed = math.ceil((duration_seconds + headroom) * ENCODER_POSITIONS_PER_SECOND)
+    if needed >= ENCODER_POSITIONS_MAX:
+        return 0
+    return max(floor, needed)
+
+
 def _int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, default))
     except ValueError:
         return default
+
+
+def _audio_ctx(name: str) -> int | None:
+    """``auto`` (the default) means per-recording; anything else is a number."""
+    raw = (os.environ.get(name) or "auto").strip().lower()
+    if raw in ("", "auto"):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def _float(name: str, default: float) -> float:
@@ -87,7 +127,13 @@ class Config:
     concurrency: int
     request_timeout: float
     startup_timeout: float
-    audio_ctx: int
+    #: ``None`` means one window per recording, sized to it. An integer pins
+    #: every request to that window; 0 is whisper's full 1500.
+    audio_ctx: int | None
+    audio_ctx_headroom: float
+    audio_ctx_floor: int
+    vad: bool
+    vad_model: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -112,13 +158,20 @@ class Config:
             concurrency=_int("RUBAI_CONCURRENCY", 1),
             request_timeout=_float("RUBAI_REQUEST_TIMEOUT_SECONDS", 120.0),
             startup_timeout=_float("RUBAI_STARTUP_TIMEOUT_SECONDS", 300.0),
-            # Whisper's encoder always runs over a 30-second window, so a
-            # three-second command costs what a thirty-second one does — on a
-            # 4 vCPU container that measured 21s either way. Shortening the
-            # encoder context is the one lever that changes it, and it is off
-            # by default because its cost in accuracy on Uzbek has not been
-            # measured here. 0 means the full 1500.
-            audio_ctx=_int("RUBAI_AUDIO_CTX", 0),
+            # "auto" sizes the window to each recording. A number pins every
+            # request to it, which is only safe while STT_MAX_SECONDS fits
+            # inside it — the check for that is in create_app.
+            audio_ctx=_audio_ctx("RUBAI_AUDIO_CTX"),
+            audio_ctx_headroom=_float("RUBAI_AUDIO_CTX_HEADROOM_SECONDS", 2.0),
+            # Very small windows are where whisper starts repeating itself, so
+            # even a one-second clip gets this much.
+            audio_ctx_floor=_int("RUBAI_AUDIO_CTX_FLOOR", 256),
+            # Off until measured. Voice activity detection drops the silence
+            # before whisper decodes it, which is the other half of the same
+            # waste — but a detector that mistakes quiet speech for silence
+            # removes words, and that is worse than the time it saves.
+            vad=(os.environ.get("RUBAI_VAD", "").lower() in ("1", "true", "on", "yes")),
+            vad_model=os.environ.get("WHISPER_VAD_MODEL", "/app/models/vad.bin"),
         )
 
 
@@ -181,10 +234,15 @@ def wav_duration_seconds(path: Path) -> float:
 class WhisperServer:
     """The model process, started once and kept warm."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self, config: Config, *, client: httpx.AsyncClient | None = None
+    ) -> None:
         self._config = config
         self._process: subprocess.Popen[bytes] | None = None
-        self._client = httpx.AsyncClient(
+        # Injectable so a test can see what actually goes on the wire. The
+        # window only matters if it reaches whisper, and a double standing in
+        # for this class cannot show that it did.
+        self._client = client or httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{config.whisper_port}",
             timeout=config.request_timeout,
         )
@@ -194,7 +252,15 @@ class WhisperServer:
     #: a value by printing its usage and exiting 0 — which from the outside is
     #: indistinguishable from a clean shutdown, and cost one deploy to find.
     OPTIONS = frozenset(
-        {"--model", "--host", "--port", "--threads", "--language", "--audio-ctx"}
+        {
+            "--model",
+            "--host",
+            "--port",
+            "--threads",
+            "--language",
+            "--audio-ctx",
+            "--vad-model",
+        }
     )
     FLAGS = frozenset({"--no-timestamps"})
 
@@ -215,7 +281,13 @@ class WhisperServer:
             "--language",
             cfg.language,
             "--no-timestamps",
-        ] + (["--audio-ctx", str(cfg.audio_ctx)] if cfg.audio_ctx > 0 else [])
+        ] + (
+            # The path is a startup flag; whether to *use* it is per request,
+            # so one warm model serves both with and without.
+            ["--vad-model", cfg.vad_model]
+            if cfg.vad and Path(cfg.vad_model).exists()
+            else []
+        )
 
     def spawn(self) -> None:
         cfg = self._config
@@ -246,16 +318,24 @@ class WhisperServer:
                 await asyncio.sleep(2)
         raise RuntimeError("whisper-server did not become ready in time")
 
-    async def transcribe(self, wav: Path) -> str:
+    async def transcribe(self, wav: Path, *, audio_ctx: int = 0) -> str:
+        data = {
+            "temperature": "0.0",
+            "response_format": "json",
+            "language": self._config.language,
+        }
+        # Per request, not per process: whisper-server reads audio_ctx from the
+        # form (server.cpp), which is what lets one warm model serve a
+        # different window for every recording.
+        if audio_ctx > 0:
+            data["audio_ctx"] = str(audio_ctx)
+        if self._config.vad:
+            data["vad"] = "true"
         with wav.open("rb") as handle:
             response = await self._client.post(
                 "/inference",
                 files={"file": ("audio.wav", handle, "audio/wav")},
-                data={
-                    "temperature": "0.0",
-                    "response_format": "json",
-                    "language": self._config.language,
-                },
+                data=data,
             )
         response.raise_for_status()
         payload: Any = response.json()
@@ -296,13 +376,17 @@ def create_app(
     engine = whisper if whisper is not None else WhisperServer(cfg)
     gate = asyncio.Semaphore(cfg.concurrency)
 
-    # A shortened encoder context that cannot reach the end of an accepted
-    # recording is silent data loss: the request succeeds, the transcript looks
-    # plausible, and the last half of what was said is simply absent. Measured:
-    # at 768 the same sentence twice over came back a different number of
-    # times. Refusing to start is the only honest response to a configuration
-    # that can lose words without saying so.
-    if cfg.audio_ctx > 0 and cfg.max_seconds > window_seconds(cfg.audio_ctx):
+    # A *pinned* window that cannot reach the end of an accepted recording is
+    # silent data loss: the request succeeds, the transcript looks plausible,
+    # and the last half of what was said is simply absent. Measured: at a fixed
+    # 768 the same sentence twice over came back a different number of times.
+    # The default sizes the window per recording and cannot do this; a number
+    # can, so a number has to be checked.
+    if (
+        cfg.audio_ctx is not None
+        and cfg.audio_ctx > 0
+        and cfg.max_seconds > window_seconds(cfg.audio_ctx)
+    ):
         raise RuntimeError(
             f"RUBAI_AUDIO_CTX={cfg.audio_ctx} hears only "
             f"{window_seconds(cfg.audio_ctx):.1f}s of audio, but "
@@ -354,6 +438,7 @@ def create_app(
             "model_loaded": engine.ready,
             "model": Path(cfg.model_path).name,
             "language": cfg.language,
+            "vad": cfg.vad,
         }
         return JSONResponse(status_code=200 if engine.ready else 503, content=body)
 
@@ -430,8 +515,17 @@ def create_app(
                     status_code=503,
                     content={"error": "The service is busy. Try again shortly."},
                 )
+            window = (
+                encoder_context_for(
+                    duration,
+                    headroom=cfg.audio_ctx_headroom,
+                    floor=cfg.audio_ctx_floor,
+                )
+                if cfg.audio_ctx is None
+                else cfg.audio_ctx
+            )
             try:
-                text = await engine.transcribe(wav)
+                text = await engine.transcribe(wav, audio_ctx=window)
             except Exception:
                 # The type, never the detail: an HTTP client puts URLs and
                 # headers into both its message and its traceback.
@@ -449,6 +543,9 @@ def create_app(
                     "language": language or cfg.language,
                     "duration_seconds": round(duration, 2),
                     "latency_ms": int((time.monotonic() - started) * 1000),
+                    # Which window this recording got. Not a secret, and the
+                    # first thing to look at when a transcript loses its end.
+                    "audio_ctx": window,
                 }
             )
         finally:

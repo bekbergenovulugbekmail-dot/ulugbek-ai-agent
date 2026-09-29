@@ -19,6 +19,7 @@ import tempfile
 import wave
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -44,7 +45,11 @@ def make_config(**overrides) -> service.Config:
         concurrency=1,
         request_timeout=5.0,
         startup_timeout=5.0,
-        audio_ctx=0,
+        audio_ctx=None,
+        audio_ctx_headroom=2.0,
+        audio_ctx_floor=256,
+        vad=False,
+        vad_model="/nonexistent/vad.bin",
     )
     defaults.update(overrides)
     return service.Config(**defaults)
@@ -61,9 +66,11 @@ class FakeWhisper:
         self.max_concurrent = 0
         self.delay = 0.0
         self.raises: Exception | None = None
+        self.windows: list[int] = []
 
-    async def transcribe(self, wav: Path) -> str:
+    async def transcribe(self, wav: Path, *, audio_ctx: int = 0) -> str:
         self.calls += 1
+        self.windows.append(audio_ctx)
         self.concurrent += 1
         self.max_concurrent = max(self.max_concurrent, self.concurrent)
         try:
@@ -379,6 +386,87 @@ def test_every_flag_is_passed_as_a_flag_and_every_option_with_a_value() -> None:
     assert argv[argv.index("--host") + 1] == "127.0.0.1"
 
 
+# --------------------------------------------------------------------------- #
+# The window is sized to the recording
+# --------------------------------------------------------------------------- #
+def test_every_window_reaches_the_end_of_its_recording() -> None:
+    """The property the whole design rests on.
+
+    Audio past the encoder window is not transcribed badly — it is not
+    transcribed at all, and the request still succeeds. So for anything inside
+    whisper's own 30-second chunk, the window must cover the audio.
+    """
+    for duration in (0.5, 1, 2, 5, 9, 11, 14, 15, 18, 22, 25, 27, 29, 29.9):
+        ctx = service.encoder_context_for(duration, headroom=2.0, floor=256)
+        assert service.window_seconds(ctx) >= duration, (
+            f"{duration}s got a {service.window_seconds(ctx)}s window"
+        )
+
+
+def test_longer_than_a_chunk_falls_back_to_whisper_s_own_handling() -> None:
+    """Past 30 seconds whisper loops over chunks, exactly as it does at 0.
+
+    Shortening the window there would break the seek it uses to advance, which
+    is what a fixed 768 did to the 22-second sample.
+    """
+    for duration in (28.1, 30, 45, 60, 120):
+        assert service.encoder_context_for(duration, headroom=2.0, floor=256) == 0
+
+
+def test_a_short_command_gets_a_much_smaller_window_than_a_fixed_768() -> None:
+    # The common case: a spoken command of a few seconds.
+    assert service.encoder_context_for(2.0, headroom=2.0, floor=256) == 256
+    assert service.encoder_context_for(5.0, headroom=2.0, floor=256) == 350
+    # And a long one gets more than 768, which is the case 768 got wrong.
+    assert service.encoder_context_for(22.0, headroom=2.0, floor=256) == 1200
+
+
+def test_the_floor_keeps_very_short_clips_out_of_the_repeating_range() -> None:
+    assert service.encoder_context_for(0.2, headroom=0.0, floor=256) == 256
+    assert service.encoder_context_for(0.2, headroom=0.0, floor=64) == 64
+
+
+async def test_the_window_reaches_the_model_and_is_reported(
+    client, engine: FakeWhisper, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        service, "convert_to_wav", lambda source, dest, **k: write_wav(dest, 3.0)
+    )
+
+    response = post(client, b"audio")
+
+    assert response.status_code == 200
+    # 3s + 2s headroom = 250 positions, below the floor, so the floor.
+    assert engine.windows == [256]
+    assert response.json()["audio_ctx"] == 256
+
+
+async def test_a_pinned_window_overrides_the_measurement(
+    engine: FakeWhisper, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        service, "convert_to_wav", lambda source, dest, **k: write_wav(dest, 3.0)
+    )
+    app = service.create_app(
+        make_config(audio_ctx=768, max_seconds=15.0),
+        whisper=engine,  # type: ignore[arg-type]
+    )
+    with TestClient(app) as http:
+        response = post(http, b"audio")
+
+    assert response.status_code == 200
+    assert engine.windows == [768]
+
+
+def test_auto_is_what_an_unset_variable_means(monkeypatch) -> None:
+    monkeypatch.delenv("RUBAI_AUDIO_CTX", raising=False)
+    assert service.Config.from_env().audio_ctx is None
+    monkeypatch.setenv("RUBAI_AUDIO_CTX", "auto")
+    assert service.Config.from_env().audio_ctx is None
+    monkeypatch.setenv("RUBAI_AUDIO_CTX", "768")
+    assert service.Config.from_env().audio_ctx == 768
+
+
 def test_a_context_that_cannot_hear_the_whole_recording_refuses_to_start() -> None:
     """Measured: at 768 a 22-second clip came back different from the baseline.
 
@@ -391,6 +479,16 @@ def test_a_context_that_cannot_hear_the_whole_recording_refuses_to_start() -> No
             make_config(audio_ctx=768, max_seconds=60.0),
             whisper=FakeWhisper(),  # type: ignore[arg-type]
         )
+
+
+def test_the_per_recording_default_never_trips_that_guard() -> None:
+    """It cannot lose the end of a recording, so there is nothing to refuse."""
+    app = service.create_app(
+        make_config(audio_ctx=None, max_seconds=60.0),
+        whisper=FakeWhisper(),  # type: ignore[arg-type]
+    )
+
+    assert app is not None
 
 
 def test_a_context_that_covers_the_limit_is_accepted() -> None:
@@ -410,11 +508,83 @@ def test_the_window_is_the_ratio_whisper_actually_uses() -> None:
     assert service.window_seconds(512) == pytest.approx(10.24)
 
 
-def test_the_encoder_context_reaches_the_model_when_it_is_set() -> None:
-    engine = service.WhisperServer(make_config(audio_ctx=768))
-    argv = engine.argv()
+async def test_the_window_is_actually_put_on_the_wire() -> None:
+    """What the route decided has to arrive at whisper.
 
-    assert argv[argv.index("--audio-ctx") + 1] == "768"
+    Deleting the two lines that put `audio_ctx` in the form failed no test
+    until this one existed: the fake whisper in every other test records the
+    argument it was called with, which says nothing about what was sent.
+    """
+    sent: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.content)
+        return httpx.Response(200, json={"text": "salom"})
+
+    wav = Path(tempfile.mkdtemp(prefix="rubai-test-")) / "a.wav"
+    write_wav(wav, 1.0)
+    try:
+        engine = service.WhisperServer(
+            make_config(),
+            client=httpx.AsyncClient(
+                base_url="http://whisper", transport=httpx.MockTransport(handler)
+            ),
+        )
+        await engine.transcribe(wav, audio_ctx=650)
+        assert b'name="audio_ctx"' in sent[0]
+        assert b"650" in sent[0]
+
+        # 0 means whisper's own full window; sending the number would be the
+        # same thing said twice, and its default path is the tested one.
+        sent.clear()
+        await engine.transcribe(wav, audio_ctx=0)
+        assert b'name="audio_ctx"' not in sent[0]
+    finally:
+        shutil.rmtree(wav.parent, ignore_errors=True)
+
+
+async def test_voice_detection_is_requested_only_when_it_is_switched_on() -> None:
+    sent: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.content)
+        return httpx.Response(200, json={"text": "salom"})
+
+    wav = Path(tempfile.mkdtemp(prefix="rubai-test-")) / "a.wav"
+    write_wav(wav, 1.0)
+    try:
+        for vad, expected in ((False, False), (True, True)):
+            sent.clear()
+            engine = service.WhisperServer(
+                make_config(vad=vad),
+                client=httpx.AsyncClient(
+                    base_url="http://whisper",
+                    transport=httpx.MockTransport(handler),
+                ),
+            )
+            await engine.transcribe(wav, audio_ctx=256)
+            assert (b'name="vad"' in sent[0]) is expected
+    finally:
+        shutil.rmtree(wav.parent, ignore_errors=True)
+
+
+def test_voice_detection_is_off_unless_asked_for(monkeypatch) -> None:
+    monkeypatch.delenv("RUBAI_VAD", raising=False)
+    assert service.Config.from_env().vad is False
+    monkeypatch.setenv("RUBAI_VAD", "on")
+    assert service.Config.from_env().vad is True
+
+
+def test_the_window_is_not_a_startup_flag() -> None:
+    """It rides on each request instead.
+
+    whisper-server reads audio_ctx from the form as well as the command line
+    (server.cpp), which is what lets one warm model serve a window sized to
+    each recording rather than one number for the life of the process.
+    """
+    for configured in (None, 768):
+        argv = service.WhisperServer(make_config(audio_ctx=configured)).argv()
+        assert "--audio-ctx" not in argv
 
 
 def test_duration_is_read_from_the_file_rather_than_a_second_process() -> None:

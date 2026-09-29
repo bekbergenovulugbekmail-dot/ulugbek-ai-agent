@@ -1,0 +1,228 @@
+# Does long speech survive, and what does each setting cost?
+#
+# A fixed 768-position encoder window halved the latency and lost the end of a
+# 22-second clip. The fix under test sizes the window to each recording. This
+# checks that nothing is lost across a range of durations, and compares it
+# against the full window and against adding voice activity detection.
+#
+# The integrity measure is objective rather than eyeballed. Every speech sample
+# is the same eleven-second sentence repeated a known number of times, so the
+# transcript must contain a distinctive phrase from it exactly that many times.
+# Fewer means speech was dropped; more means the decoder repeated itself. Both
+# are failures and neither is visible from a latency number.
+#
+# Deploys nothing. Manual only.
+
+name: Rubai STT integrity
+
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: "Measurements per sample"
+        required: true
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    name: Long speech across three configurations
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the image once
+        run: docker build -t rubai-stt:integrity services/rubai-stt
+
+      - name: Build the sample set
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg jq bc
+          cd /tmp
+          curl -fsSL -o jfk.wav \
+            https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav
+
+          # Every speech sample is the same sentence a known number of times,
+          # which is what makes "did anything go missing" a count rather than a
+          # judgement. English, because this repository has no Uzbek audio —
+          # see docs/RUBAI_STT_BENCHMARK.md.
+          repeat() {
+            count=$1; out=$2
+            : > list.txt
+            for _ in $(seq 1 "$count"); do echo "file '/tmp/jfk.wav'" >> list.txt; done
+            ffmpeg -loglevel error -f concat -safe 0 -i list.txt -c copy "$out" -y
+          }
+          silence() {
+            ffmpeg -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono \
+              -t "$1" -c:a pcm_s16le "$2" -y
+          }
+
+          repeat 2 speech-22s.wav
+          repeat 3 speech-33s.wav
+          repeat 5 speech-55s.wav
+          repeat 6 speech-66s.wav          # over STT_MAX_SECONDS on purpose
+          silence 30 silence-30s.wav
+          silence 3 gap-short.wav
+          silence 15 gap-long.wav
+
+          # Speech, silence, speech: the shape of someone pausing to think.
+          printf "file '/tmp/jfk.wav'\nfile '/tmp/gap-short.wav'\nfile '/tmp/jfk.wav'\n" > g1.txt
+          ffmpeg -loglevel error -f concat -safe 0 -i g1.txt -c copy gap3-25s.wav -y
+          printf "file '/tmp/jfk.wav'\nfile '/tmp/gap-long.wav'\nfile '/tmp/jfk.wav'\n" > g2.txt
+          ffmpeg -loglevel error -f concat -safe 0 -i g2.txt -c copy gap15-37s.wav -y
+
+          ffmpeg -loglevel error -i jfk.wav -c:a libopus -f webm jfk.webm -y
+
+          for f in jfk.wav jfk.webm speech-22s.wav speech-33s.wav speech-55s.wav \
+                   speech-66s.wav gap3-25s.wav gap15-37s.wav silence-30s.wav; do
+            printf '  %-18s %6.1fs  %s bytes\n' "$f" \
+              "$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$f")" \
+              "$(stat -c%s "$f")"
+          done
+
+      - name: Measure every configuration
+        env:
+          REPEATS: ${{ inputs.repeats }}
+        run: |
+          : > /tmp/results.tsv
+
+          suite() {
+            label=$1; ctx=$2; vad=$3
+            echo "=============================================================="
+            echo "$label   (RUBAI_AUDIO_CTX=$ctx, VAD=$vad)"
+            echo "=============================================================="
+            docker run -d --name rubai \
+              -e STT_SERVICE_TOKEN=ci-token-not-a-real-credential \
+              -e RUBAI_AUDIO_CTX="$ctx" \
+              -e RUBAI_VAD="$vad" \
+              -p 8080:8080 rubai-stt:integrity >/dev/null
+
+            start=$(date +%s)
+            ready=no
+            for _ in $(seq 1 90); do
+              if [ "$(curl -sS -o /dev/null -w '%{http_code}' \
+                      http://127.0.0.1:8080/health || echo 000)" = "200" ]; then
+                ready=yes; break
+              fi
+              sleep 5
+            done
+            if [ "$ready" != "yes" ]; then
+              echo "::error title=Never became ready::$label"
+              docker logs rubai | tail -40; docker rm -f rubai >/dev/null; exit 1
+            fi
+            echo "ready in $(( $(date +%s) - start ))s"
+            echo
+
+            for entry in jfk.wav:1 jfk.webm:1 speech-22s.wav:2 speech-33s.wav:3 \
+                         speech-55s.wav:5 gap3-25s.wav:2 gap15-37s.wav:2 \
+                         silence-30s.wav:0 speech-66s.wav:refused; do
+              sample=${entry%%:*}; expected=${entry##*:}
+              for repeat in $(seq 1 "$REPEATS"); do
+                began=$(date +%s%3N)
+                code=$(curl -sS -o /tmp/out.json -w '%{http_code}' \
+                       -H "Authorization: Bearer ci-token-not-a-real-credential" \
+                       -F "file=@/tmp/$sample" \
+                       http://127.0.0.1:8080/inference || echo 000)
+                wall=$(( $(date +%s%3N) - began ))
+
+                if [ "$expected" = "refused" ]; then
+                  # Past the limit the service must say so rather than
+                  # transcribing part of it.
+                  printf '  %-16s over the limit -> HTTP %s\n' "$sample" "$code"
+                  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                    "$label" "$sample" "$code" "$wall" "0" "refused" "" \
+                    >> /tmp/results.tsv
+                  continue
+                fi
+
+                if [ "$code" != "200" ]; then
+                  echo "  $sample: HTTP $code"; cat /tmp/out.json; echo
+                  docker rm -f rubai >/dev/null
+                  echo "::error title=Transcription failed::$label $sample"; exit 1
+                fi
+                duration=$(jq -r '.duration_seconds' /tmp/out.json)
+                ctx_used=$(jq -r '.audio_ctx' /tmp/out.json)
+                text=$(jq -r '.text' /tmp/out.json)
+                # The count that decides whether anything was lost.
+                found=$(printf '%s' "$text" \
+                        | grep -o "ask not what your country" | wc -l | tr -d ' ')
+                rtf=$(echo "scale=2; ($wall/1000) / $duration" | bc -l)
+                printf '  %-16s %5ss  ctx %-5s wall %6sms  rtf %5s  phrase %s/%s  %s\n' \
+                  "$sample" "$duration" "$ctx_used" "$wall" "$rtf" \
+                  "$found" "$expected" \
+                  "$( [ "$found" = "$expected" ] && echo OK || echo MISMATCH )"
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                  "$label" "$sample" "$found/$expected" "$wall" "$duration" \
+                  "$ctx_used" "$(printf '%s' "$text" | head -c 200)" \
+                  >> /tmp/results.tsv
+              done
+            done
+            echo
+            docker stats --no-stream --format "  memory: {{.MemUsage}}" rubai || true
+            docker rm -f rubai >/dev/null
+            echo
+          }
+
+          suite "full"     "0"    "off"
+          suite "auto"     "auto" "off"
+          suite "auto+vad" "auto" "on"
+
+      - name: The verdict
+        if: always()
+        run: |
+          [ -s /tmp/results.tsv ] || { echo "no results"; exit 1; }
+          python3 - <<'EOF'
+          from collections import defaultdict
+
+          rows = defaultdict(dict)
+          walls = defaultdict(dict)
+          texts = defaultdict(dict)
+          for line in open("/tmp/results.tsv"):
+              label, sample, found, wall, duration, ctx, *rest = line.rstrip("\n").split("\t")
+              rows[sample][label] = found
+              walls[sample][label] = int(wall)
+              texts[sample][label] = rest[0] if rest else ""
+
+          labels = ["full", "auto", "auto+vad"]
+          print()
+          print("Transcript integrity — occurrences of the sentence, found/expected")
+          print()
+          print("| sample | " + " | ".join(labels) + " |")
+          print("|---" * (len(labels) + 1) + "|")
+          for sample in rows:
+              print(f"| `{sample}` | " + " | ".join(
+                  rows[sample].get(label, "—") for label in labels) + " |")
+
+          print()
+          print("Wall time, ms")
+          print()
+          print("| sample | " + " | ".join(labels) + " | auto vs full |")
+          print("|---" * (len(labels) + 2) + "|")
+          for sample in walls:
+              cells = [str(walls[sample].get(label, "—")) for label in labels]
+              a, b = walls[sample].get("full"), walls[sample].get("auto")
+              change = f"{(b - a) / a * 100:+.1f}%" if a and b else "—"
+              print(f"| `{sample}` | " + " | ".join(cells) + f" | {change} |")
+
+          print()
+          failures = [
+              (sample, label, found)
+              for sample, per in rows.items()
+              for label, found in per.items()
+              if "/" in found and found.split("/")[0] != found.split("/")[1]
+          ]
+          if failures:
+              print("Integrity mismatches:")
+              for sample, label, found in failures:
+                  print(f"  {label:<9} {sample:<18} {found}")
+          else:
+              print("Every configuration returned every sentence exactly once per repeat.")
+
+          print()
+          print("What silence produced:")
+          for label in labels:
+              print(f"  {label:<9} {texts.get('silence-30s.wav', {}).get(label, '—')!r}")
+          EOF

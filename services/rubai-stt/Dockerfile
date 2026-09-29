@@ -64,6 +64,12 @@ ARG MODEL_REPO=azimxxm/rubaistt-v2-medium-ggml
 ARG MODEL_COMMIT=a8498d5fd8d0b35e26a6b74521cf194c37c6a050
 ARG MODEL_FILE=ggml-rubaistt-medium-q5_0.bin
 ARG MODEL_SHA256=3740210b611c13c5bad257d6207dbf4572b7843043191bab39ccdf47c1734e9c
+# Voice activity detection: 865 KiB beside a 514 MiB model, so it is carried
+# whether or not it is switched on. MIT, and pinned the same way.
+ARG VAD_REPO=ggml-org/whisper-vad
+ARG VAD_COMMIT=9ffd54a1e1ee413ddf265af9913beaf518d1639b
+ARG VAD_FILE=ggml-silero-v5.1.2.bin
+ARG VAD_SHA256=29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
@@ -79,6 +85,13 @@ RUN curl -fsSL --retry 3 --retry-delay 5 \
     # the right name passes every check but this one.
     && test "$(head -c4 model.bin)" = "lmgg" \
     && echo "model verified: $(stat -c%s model.bin) bytes"
+
+RUN curl -fsSL --retry 3 --retry-delay 5 \
+        "https://huggingface.co/${VAD_REPO}/resolve/${VAD_COMMIT}/${VAD_FILE}" \
+        -o vad.bin \
+    && echo "${VAD_SHA256}  vad.bin" | sha256sum -c - \
+    && test "$(head -c4 vad.bin)" = "lmgg" \
+    && echo "vad verified: $(stat -c%s vad.bin) bytes"
 
 
 # --- runtime --------------------------------------------------------------- #
@@ -97,6 +110,7 @@ WORKDIR /app
 COPY --from=whisper /src/build/bin/whisper-server /app/bin/whisper-server
 COPY --from=whisper /src/WHISPER_COMMIT /app/WHISPER_COMMIT
 COPY --from=model /model/model.bin /app/models/model.bin
+COPY --from=model /model/vad.bin /app/models/vad.bin
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -108,6 +122,7 @@ USER rubai
 
 ENV WHISPER_BIN=/app/bin/whisper-server \
     WHISPER_MODEL=/app/models/model.bin \
+    WHISPER_VAD_MODEL=/app/models/vad.bin \
     WHISPER_PORT=8081 \
     STT_LANGUAGE=uz \
     PORT=8080
