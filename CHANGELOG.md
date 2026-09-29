@@ -41,6 +41,29 @@ The value appears in no log, no error body and no health response, and the
 Anthropic key is rejected as a user credential: it authenticates this server to
 Anthropic and nothing else.
 
+**Verified against production**, not only in tests — deployment check run
+36542604824 on 2026-09-29. An anonymous request, a wrong token of a plausible
+shape and the real token sent without the `Bearer` scheme all answered 401 with
+byte-identical bodies and a `WWW-Authenticate` challenge; the correct token
+answered 200. The live stream refused both a missing and a forged token, and
+opened with a minted one, delivering 10 frames for a real run. Both agent paths
+completed on the deployed service: `/agent/runs` (202, then COMPLETED, exactly
+one run for the request) and `/agent/run` (200, COMPLETED, verification
+SUCCESS). No token appears in that log.
+
+There is no cross-user 403 test and there cannot be one: authorization needs a
+second identity to refuse, and this deployment has one operator. `docs/PROJECT_STATE.md` says so plainly rather than substituting a fixture that would
+pass without proving anything.
+
+**The deploy briefly outran the variable.** The branch shipped before
+`AUTH_TOKEN` existed on the Railway service, because the deploy job is gated on
+the default branch and the default branch here *is* the working branch.
+Production answered 503 to everything but health for about twenty minutes,
+behind a green pipeline — the pipeline polls `/api/health`, which is open by
+design and answers `ok` regardless. It now reads the `auth` block in the
+response it was already fetching and fails the deploy when the deployed service
+reports no usable token, naming the variable.
+
 ### Production brought up on Railway
 
 The API and the Web Control Center now run as two Railway services built from

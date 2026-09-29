@@ -919,6 +919,10 @@ Every audit payload is redacted on the way in.
   `AUTH_TOKEN` is the only thing that opens the API, must be at least 32
   characters, and is compared with `hmac.compare_digest` so a wrong guess takes
   the same time as any other.
+- **Rotating is the whole revocation story.** Change `AUTH_TOKEN` on the API
+  service — and the repository secret of the same name, which the deployment
+  check uses — and every stored copy stops working at once, in every browser.
+  There is nothing to invalidate server-side, and nothing to clean up.
 - **Secrets come only from the environment.** `ANTHROPIC_API_KEY` is held as a
   `SecretStr`, so even a `repr()` of the settings object cannot leak it.
 - **`.env` is gitignored**; only `.env.example` is committed.

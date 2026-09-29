@@ -18,14 +18,15 @@ command or a run behind it.
 Both run on Railway as separate services from this one repository: the API
 builds the root `Dockerfile`, the console builds `frontend/Dockerfile`.
 
-Current production health, as the deployed build reports it (this branch adds
-an `auth` block to it, and is not deployed):
+Current production health, as the deployed build reports it (deployment check
+run 36542604824, 2026-09-29 08:25 UTC):
 
 ```json
-{"status":"ok","environment":"production",
+{"status":"ok","version":"0.1.0","environment":"production",
  "database":{"connected":true,"error":null},
  "llm":{"configured":true,"model":"claude-opus-5",
         "workspace":{"configured":true,"usable":true,"problem":null}},
+ "auth":{"configured":true,"usable":true},
  "tools":{"count":15}}
 ```
 
@@ -53,10 +54,8 @@ Re-run it yourself: **Actions → Deployment check → Run workflow**, with
 
 ## Authentication
 
-**Live, and currently refusing everything.** This branch is the repository's
-default branch, so pushing it deployed it; `AUTH_TOKEN` is not set on the
-Railway API service, so the API answers 503 to every route but health. Setting
-that one variable is the whole remedy — see *Known gaps*.
+**Live and enforced in production.** Verified against the deployed service from
+a GitHub runner, not from a test suite — see *Measured against production*.
 
 The model is one shared operator token, chosen because this deployment has one
 operator: a user table, sessions and password reset would be machinery around a
@@ -87,11 +86,71 @@ How it was checked, rather than assumed:
 - **The token reaches no log**, no error body and no health response.
 - 375 backend tests, 60 frontend tests.
 
-One thing this cannot show: with a single operator there is no second identity
-to be refused, so there is no meaningful cross-user authorization test. What is
-tested is that a request cannot name its own owner — `/agent/run` and
+### What cannot be tested here, and why
+
+**There is no cross-user 403 test, and there cannot be one.** Authorization
+needs two identities: one that owns a thing and one that is refused it. This
+deployment authenticates a single operator against a shared token, so every
+authenticated request is the same principal — a "user B is denied user A's
+project" test would have to invent user B, and would then be testing a fixture
+rather than the system. Writing one would produce a green check that proves
+nothing, which is worse than the gap it papers over.
+
+What *is* tested, and is the meaningful half at one-operator scale, is that a
+request cannot choose whose authority it acts with: `/agent/run` and
 `/agent/runs` discard `user_id` from the body, and an approval records the
-authenticated caller rather than whoever the body claimed.
+authenticated caller rather than whoever the body claimed (`decided_by` was
+removed from the request model entirely).
+
+This becomes testable the moment a second principal exists. The place to add it
+is `_owned_by()` in `ulugbek_ai/api/routes/agent.py`, which is where a
+principal would map to a user id; until then, treat the absence of that test as
+a property of the deployment, not an oversight.
+
+### Measured against production
+
+Deployment check run 36542604824, 2026-09-29 08:25 UTC, against
+`https://ulugbek-ai-agent-production.up.railway.app/api`. No token appears in
+that log: the checks report status codes, field names and frame types, and
+GitHub masks the header values.
+
+| What was sent | Answer |
+|---|---|
+| `GET /health` (open) | `200`, `auth: {configured: true, usable: true}` |
+| `GET /system/overview`, no header | **401** |
+| `GET /system/overview`, wrong token of a plausible shape | **401** |
+| `GET /system/overview`, real token without the `Bearer` scheme | **401** |
+| the three refusal bodies | byte-identical; `www-authenticate: Bearer` present |
+| `GET /system/overview`, real token, correctly presented | `200` — `agent, components, counters, environment, healthy, tasks_by_status, version` |
+| `GET /events/runs/{id}/stream`, no token | **401** |
+| `GET /events/runs/{id}/stream?token=<forged>` | **401** |
+| `POST /events/stream-token` with the operator token | `200` — `token`, `expires_in: 300` |
+
+The refusal body, identical for all three wrong ways of asking:
+
+```json
+{"error":{"code":"authentication_required","message":"This endpoint requires the operator token. Send it in the Authorization header.","details":{}}}
+```
+
+Then the same run the console makes, authenticated:
+
+```
+POST /agent/runs  -> 202   run 0eece5a2-be80-4189-b096-3d2e7dabcbb6
+  status: RUNNING / task PENDING  (immediately)
+  status: COMPLETED               (~9s later)   output: pong
+  runs carrying this request's marker: 1
+
+GET /events/runs/0eece5a2.../stream?token=<minted>
+  -> 200 text/event-stream; charset=utf-8
+  7 agent-event · 2 agent-state · 1 done   (10 frames)
+
+POST /agent/run   -> 200   status: COMPLETED   output: pong
+  verification: SUCCESS
+```
+
+Both agent paths were exercised on purpose: `/agent/runs` hands the run to a
+background task on its own session, `/agent/run` holds the request open, and a
+working one says nothing about the other.
 
 ## Pipeline
 
@@ -125,19 +184,18 @@ returns `access-control-allow-origin: https://frontend-production-b432.up.railwa
 
 ## Known gaps
 
-- **Production is deployed without its token.** Confirmed from a GitHub
-  runner on 2026-09-29: `/api/system/overview` without a header answers
-  **HTTP 503**, and `/api/health` reports `auth: {configured: false,
-  usable: false}`. The service is up and the console can reach it; it is
-  refusing everything because it has no credential to check against. Set
-  `AUTH_TOKEN` on the Railway **API** service and the API serves again — no
-  redeploy needed, since the variable is read at request time.
-
-  The order was supposed to be the other way round. The deploy job is gated on
-  the default branch, and the default branch here *is* the working branch, so
-  the push shipped it. The pipeline now fails the deploy when the deployed
-  service reports no usable token, instead of reporting green while production
-  refuses every request.
+- **One operator, one shared token.** Not a gap to close, but a limit to
+  state: there is no second account, no per-user scoping, and therefore no
+  cross-user authorization to test (see above). Rotating the token is the whole
+  revocation story, and it logs out every browser at once.
+- **Deploying briefly outran the variable.** On 2026-09-29 the auth branch
+  shipped before `AUTH_TOKEN` existed on the service — the deploy job is gated
+  on the default branch, and the default branch here *is* the working branch.
+  Production answered 503 to everything but health for about twenty minutes,
+  with a green pipeline behind it, because the pipeline only polls
+  `/api/health` and that endpoint is open by design. It now reads the `auth`
+  block in the response it was already fetching and fails the deploy when the
+  deployed service reports no usable token.
 - **The console's error hint is stale.** A configuration error shows the
   backend's precise message and then, under it, a fixed line recommending
   `ANTHROPIC_API_KEY` — which contradicts the message whenever something else
