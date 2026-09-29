@@ -5,6 +5,36 @@ because a list of verbs is not worth reading later.
 
 ## Unreleased
 
+### Speech runs on our own hardware, and is too slow to use as it stands
+
+Transcription moved from Google to **rubaiSTT v2 medium** — a Whisper-medium
+fine-tune for Uzbek Latin — on whisper.cpp in `services/rubai-stt`. No cloud
+key, no per-minute bill, and the audio never leaves the deployment.
+
+- **A service of its own**, not the API container: 514 MiB of weights in the
+  process that serves the agent would trade a service that starts in seconds
+  for one that starts in a minute and cannot be sized apart from the model.
+  whisper.cpp listens on loopback inside that container; the only thing on a
+  reachable port is the guard in front of it, which checks the token, enforces
+  the limits, converts with ffmpeg and deletes every byte it wrote.
+- **Pinned by content.** whisper.cpp v1.9.4 (MIT); the GGML conversion at
+  commit `a8498d5`, 539,212,484 bytes, sha256 `3740210b…`, Apache-2.0, from
+  `islomov/rubaistt_v2_medium`, also Apache-2.0. A provenance workflow produced
+  those values where Hugging Face is reachable and the build re-checks all
+  three, so different weights cannot arrive behind the same Dockerfile.
+- **Safari works now.** ffmpeg decodes whatever the browser recorded, so
+  `audio/mp4` joins the containers the console records and the backend accepts.
+
+**Measured, and the number is the headline: ~21 seconds per transcription** on
+4 vCPU — and the same 21 seconds for five seconds of audio as for thirty,
+because Whisper's encoder always runs over a 30-second window. With the agent's
+own ~9 s that is half a minute from speaking to hearing an answer.
+`docs/RUBAI_STT.md` has the measurements and the four ways out, cheapest first.
+Nothing was shipped pretending otherwise.
+
+Two things the same run showed: the Uzbek fine-tune still transcribes English
+correctly, and it hallucinates the word "musiqa" over silence.
+
 ### The operator can speak to the agent
 
 Uzbek in, Uzbek out. The agent already answered in whatever language it was

@@ -65,12 +65,43 @@ not been re-tested here.
 
 ---
 
-## Resources
+## Resources — measured, and the number is a problem
 
-Measured on a GitHub runner (4 vCPU) by `.github/workflows/rubai-stt.yml`,
-which builds the image and times real requests. See the workflow's latest run
-for current numbers; it prints image size, time-to-ready, per-request latency
-and container memory.
+`.github/workflows/rubai-stt.yml` run **36560660876**, 2026-09-29, on a GitHub
+runner with **4 vCPU**:
+
+| | |
+|---|---|
+| Container memory, model loaded and idle | **873 MiB** |
+| `jfk.wav`, 11 s of speech | **21,355 ms** — transcribed correctly |
+| `jfk.webm`, the same audio as Opus (what a browser sends) | **21,306 ms** — identical text |
+| 5 s of silence | **20,471 ms** |
+| 30 s of silence | **20,463 ms** |
+
+Read the last three rows together. **Latency does not depend on how long the
+recording is.** Whisper's encoder always runs over a 30-second window, so a
+two-second "loyihalarimni ko'rsat" costs what half a minute of speech costs.
+
+**At ~21 s per transcription this is too slow to talk to.** The agent itself
+takes about 9 s for a simple run, so a voice command would be roughly half a
+minute from speaking to hearing an answer. Nothing about the code fixes that;
+it is the model, the CPU count and the encoder window. The options, cheapest
+first:
+
+| Change | Effect | Cost |
+|---|---|---|
+| `RUBAI_AUDIO_CTX=768` (or 512) | Shortens the encoder window. The single biggest lever — the padding is the cost | Some accuracy, **unmeasured on Uzbek**. Off by default for that reason |
+| More vCPU on the service | whisper.cpp scales with threads to roughly 8 | Money, per month, continuously |
+| Whisper **small** fine-tune instead of medium | ~3× faster, ~250 MiB | Noticeably worse on Uzbek, which is the language that needed a fine-tune |
+| Back to a cloud API | Fast, no always-on container | A per-minute bill and the audio leaves the deployment. One settings line: the provider is an interface |
+
+Two smaller findings from the same run, both worth knowing:
+
+- The English test sentence came back **correct**, so the Uzbek fine-tune keeps
+  its English. Mixed Uzbek-English commands are not obviously doomed.
+- Silence came back as **"musiqa"**. Whisper hallucinates on empty audio; the
+  console should not send a recording with no speech in it, and this is why
+  whisper.cpp ships a VAD option that is worth turning on next.
 
 What the shape of the problem dictates, regardless of the machine:
 
@@ -86,11 +117,10 @@ What the shape of the problem dictates, regardless of the machine:
   stays 503 until the model has answered a warm-up request, so Railway does not
   route traffic at a container that cannot serve it.
 
-**If the plan cannot carry it.** The smallest step down is `q4_0` (~400 MiB,
-lower accuracy), then Whisper *small* (~250 MiB, noticeably worse on Uzbek),
-then back to a cloud API for the audio while keeping this architecture — the
-provider is one settings line. Scaling the service to zero between uses trades
-money for a cold start on the first command of the day.
+**Memory is not the constraint; time is.** 873 MiB idle fits a small container
+comfortably. It is the 21 seconds that decides whether this is a voice
+assistant or a form of patience, and that is a plan-size and model-size
+question rather than a code one.
 
 ---
 
@@ -117,6 +147,7 @@ STT_MAX_BYTES=10485760
 STT_MAX_SECONDS=60
 RUBAI_CONCURRENCY=1
 WHISPER_THREADS=<defaults to the container's CPU count>
+RUBAI_AUDIO_CTX=0            # 768 or 512 trades accuracy for a much shorter wait
 ```
 
 Neither value is ever sent to the browser. The console talks to the API, the

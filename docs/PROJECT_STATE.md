@@ -169,9 +169,9 @@ API service, so the console shows no microphone in production yet.
 
 | | |
 |---|---|
-| Transcription | Google Cloud Speech-to-Text, `uz-UZ`, behind the `SpeechToText` interface |
+| Transcription | **rubaiSTT v2 medium** on whisper.cpp, in `services/rubai-stt`, behind the `SpeechToText` interface. Google remains implemented and selectable. See `docs/RUBAI_STT.md` |
 | Synthesis | The browser's `SpeechSynthesis`. No server provider; `/api/voice/speak` says so |
-| Containers accepted | `audio/webm`, `audio/ogg`, `audio/flac`. Safari's `audio/mp4` is refused **by name**, and the console hides the button rather than recording it |
+| Containers accepted | Whatever ffmpeg decodes — `audio/webm`, `audio/ogg`, `audio/mp4`, `audio/flac`, … Safari included |
 | Limits | `STT_MAX_BYTES` (10 MB, enforced) and `STT_MAX_SECONDS` (60, respected by the recorder and checked against a declared duration) |
 | Auth | The same operator token. Both routes joined the protected group in `api/router.py`; the existing anonymous sweep caught them without being told |
 | Storage | None. Neither endpoint takes a session or the database, and a test asserts that rather than counting rows in the tables it thought to check |
@@ -188,14 +188,23 @@ What was verified, not assumed:
   the message and the traceback, so the route logs the exception type alone.
 - 395 backend tests, 83 frontend tests, typecheck, lint and a production build.
 
+### Speech is not fast enough yet
+
+Measured on CI run 36560660876 (4 vCPU): **~21 s per transcription, regardless
+of how long the recording is** — Whisper's encoder always runs over a
+30-second window — and 873 MiB of container memory. Correct output, unusable
+latency for conversation. `docs/RUBAI_STT.md` sets out the options: shorten the
+encoder context, more vCPU, a smaller model, or back to a cloud API. That is a
+plan-size decision, not a code one.
+
 ## Pipeline
 
 `.github/workflows/ci.yml` on every push:
 
 | Job | What it guards |
 |---|---|
-| Backend | migrations up→down→up on PostgreSQL 16, schema drift, 395 tests, pyflakes |
-| Web Control Center | typecheck, lint, 83 tests, production build |
+| Backend | migrations up→down→up on PostgreSQL 16, schema drift, 410 tests, pyflakes |
+| Web Control Center | typecheck, lint, 84 tests, production build |
 | Deploy to Railway | default branch only; waits for `/api/health` to answer `ok`, and fails if the deployed service has no usable token |
 | Deploy the Web Control Center | default branch only; deploys `frontend` and waits for `/healthz`. If `RAILWAY_SERVICE_WEB` is ever unset it skips and prints the services the token can reach, rather than leaving the value to be guessed |
 
@@ -230,6 +239,11 @@ build triggered by Railway's own GitHub integration would use the *repository
 root* — the root `railway.json`, the root `Dockerfile`, the backend image — on
 the console's domain. So that integration is not merely redundant for this
 service; it must stay off.
+
+`.github/workflows/rubai-stt.yml` builds the speech image, starts it, checks it
+refuses an unauthenticated caller, and times real transcriptions — every number
+in `docs/RUBAI_STT.md` comes from there. `rubai-model-provenance.yml` is the
+manual job that produced the model's commit, size and hash.
 
 `.github/workflows/deployment-check.yml` is manual: it looks at production the
 way a browser does — the API URL compiled into the deployed bundle, the CORS

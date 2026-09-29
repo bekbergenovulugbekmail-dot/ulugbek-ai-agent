@@ -17,32 +17,57 @@ There is no form. Every project is created with a POST, which makes the
 Projects page read-only in practice and the GitHub and Railway bindings
 awkward to set up.
 
-## Turn the microphone on
+## Decide what speech should cost
 
-Voice is implemented, tested and deployed; it is off because it has no key.
+The Uzbek model works and is too slow to talk to. Measured on 4 vCPU: **~21
+seconds per transcription**, and the same 21 seconds whether the recording is
+five seconds or thirty, because Whisper's encoder always runs over a 30-second
+window. With the agent's own ~9 s that is half a minute per spoken command.
 
-1. Google Cloud → a project with **Cloud Speech-to-Text API** enabled → an API
-   key **restricted to that API**.
-2. Railway → the **ulugbek-ai-agent** (API) service → Variables →
-   `STT_API_KEY`. Nothing on the web service: the browser never holds the key.
-3. `/api/health` then reports `stt: {configured: true, usable: true}`, and the
-   microphone button appears in the console.
+This is the one decision nobody else can make, because each way out costs
+something different:
 
-Until then the console hides the button, `/api/voice/transcribe` answers 503
-naming the variable, and nothing else is affected.
+| | Effect | Cost |
+|---|---|---|
+| `RUBAI_AUDIO_CTX=768` on the speech service | The biggest lever — the padding *is* the cost | Accuracy, unmeasured on Uzbek |
+| More vCPU on that service | Scales to roughly 8 threads | Money, monthly, continuously |
+| A Whisper **small** fine-tune | ~3× faster, ~250 MiB | Worse on Uzbek, which is why it was fine-tuned |
+| Back to a cloud API | Fast, nothing always-on | A per-minute bill, and the audio leaves the deployment |
 
-Two things worth knowing before the first real recording:
+Try `RUBAI_AUDIO_CTX=768` first: it is free, reversible, and
+`.github/workflows/rubai-stt.yml` measures the result on every push.
 
-- **Safari and iOS cannot use it.** They record `audio/mp4`, which Google's API
-  cannot decode. The console hides the button there rather than failing on
-  every upload. Fixing it means either a provider that reads MP4 or a
-  transcoding step, and the second adds `ffmpeg` to the image.
-- **Nobody has measured the transcription quality yet.** Uzbek is low-resource
-  and vendor accuracy claims do not survive contact with a real microphone.
-  Record twenty of your own commands — short, long, and with the English
-  technical words you actually use — and compare Google against a local
-  provider before assuming the choice is settled. `SpeechToText` exists so the
-  answer is one adapter.
+## Deploy the speech service
+
+The image builds, runs and transcribes in CI; nothing of it is on Railway yet.
+
+1. Railway → **New service** → this repository → root directory
+   `services/rubai-stt`. Leave it **without a public domain**: the API reaches
+   it privately and the model should not be on the internet.
+2. On it: `STT_SERVICE_TOKEN` (generate with
+   `python -c "import secrets; print(secrets.token_urlsafe(32))"`). It refuses
+   to start without one.
+3. On the **API** service: `STT_PROVIDER=rubai`,
+   `STT_SERVICE_URL=http://rubai-stt.railway.internal:8080`, and the same
+   `STT_SERVICE_TOKEN`.
+4. Then add `RAILWAY_SERVICE_WEB`'s equivalent for this service if you want CI
+   to deploy it, the same way the console is deployed.
+
+`/api/health` will then report `stt: {provider: "rubai", configured: true,
+usable: true}` and the microphone appears in the console.
+
+## Measure it on your own voice
+
+Nobody has transcribed real Uzbek through this yet — the CI check transcribes
+English, which proves the pipeline and nothing about accuracy. The model
+author reports ~17% WER on their test set; that is a fact about their
+recordings.
+
+`docs/RUBAI_STT_BENCHMARK.md` has the method and says plainly that it holds no
+results. Record twenty commands the way you would actually speak them, write
+the manifest, and run `scripts/rubai_benchmark.py`. Until that is done, the
+provider choice is not settled — `SpeechToText` exists so switching is one
+adapter.
 
 ## Confirm, once
 

@@ -76,6 +76,7 @@ class Config:
     concurrency: int
     request_timeout: float
     startup_timeout: float
+    audio_ctx: int
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -100,6 +101,13 @@ class Config:
             concurrency=_int("RUBAI_CONCURRENCY", 1),
             request_timeout=_float("RUBAI_REQUEST_TIMEOUT_SECONDS", 120.0),
             startup_timeout=_float("RUBAI_STARTUP_TIMEOUT_SECONDS", 300.0),
+            # Whisper's encoder always runs over a 30-second window, so a
+            # three-second command costs what a thirty-second one does — on a
+            # 4 vCPU container that measured 21s either way. Shortening the
+            # encoder context is the one lever that changes it, and it is off
+            # by default because its cost in accuracy on Uzbek has not been
+            # measured here. 0 means the full 1500.
+            audio_ctx=_int("RUBAI_AUDIO_CTX", 0),
         )
 
 
@@ -175,7 +183,7 @@ class WhisperServer:
     #: a value by printing its usage and exiting 0 — which from the outside is
     #: indistinguishable from a clean shutdown, and cost one deploy to find.
     OPTIONS = frozenset(
-        {"--model", "--host", "--port", "--threads", "--language"}
+        {"--model", "--host", "--port", "--threads", "--language", "--audio-ctx"}
     )
     FLAGS = frozenset({"--no-timestamps"})
 
@@ -196,7 +204,7 @@ class WhisperServer:
             "--language",
             cfg.language,
             "--no-timestamps",
-        ]
+        ] + (["--audio-ctx", str(cfg.audio_ctx)] if cfg.audio_ctx > 0 else [])
 
     def spawn(self) -> None:
         cfg = self._config

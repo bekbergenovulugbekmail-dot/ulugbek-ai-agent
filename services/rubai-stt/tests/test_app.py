@@ -44,6 +44,7 @@ def make_config(**overrides) -> service.Config:
         concurrency=1,
         request_timeout=5.0,
         startup_timeout=5.0,
+        audio_ctx=0,
     )
     defaults.update(overrides)
     return service.Config(**defaults)
@@ -371,8 +372,18 @@ def test_every_flag_is_passed_as_a_flag_and_every_option_with_a_value() -> None:
 
     # The language is stated rather than detected.
     assert argv[argv.index("--language") + 1] == "uz"
+    # Off by default: shortening the encoder context is the only lever that
+    # makes a short command cheaper, and its cost on Uzbek is not yet measured.
+    assert "--audio-ctx" not in argv
     # The model server is never reachable from outside the container.
     assert argv[argv.index("--host") + 1] == "127.0.0.1"
+
+
+def test_the_encoder_context_reaches_the_model_when_it_is_set() -> None:
+    engine = service.WhisperServer(make_config(audio_ctx=768))
+    argv = engine.argv()
+
+    assert argv[argv.index("--audio-ctx") + 1] == "768"
 
 
 def test_duration_is_read_from_the_file_rather_than_a_second_process() -> None:
