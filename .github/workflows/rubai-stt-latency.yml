@@ -1,0 +1,187 @@
+# One question: does shortening the encoder context make this usable?
+#
+# ~21 s per transcription was measured regardless of clip length, because
+# Whisper's encoder always runs over a 30-second window. `--audio-ctx` shortens
+# that window. Whether the time saved costs more than it is worth is not a
+# thing to reason about — it is a thing to run.
+#
+# One image, two containers, one after the other. Never at the same time: two
+# whisper processes on four shared vCPU would measure contention rather than
+# the setting. Two repeats each, both printed, so the runner's own noise is
+# visible instead of averaged away.
+#
+# Deploys nothing. Manual only.
+
+name: Rubai STT latency
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_ctx:
+        description: "Encoder context for the baseline (0 = the full 1500)"
+        required: true
+        default: "0"
+      candidate_ctx:
+        description: "Encoder context for the candidate"
+        required: true
+        default: "768"
+      repeats:
+        description: "Measurements per sample"
+        required: true
+        default: "2"
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: Baseline against candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the image once
+        run: docker build -t rubai-stt:latency services/rubai-stt
+
+      - name: Prepare the samples
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg jq bc
+          # Real speech, and the two silences. English, because there is no
+          # Uzbek audio in this repository — see docs/RUBAI_STT_BENCHMARK.md.
+          # It is the same audio for both configurations, which is what makes
+          # the comparison mean anything.
+          curl -fsSL -o /tmp/jfk.wav \
+            https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav
+          ffmpeg -loglevel error -i /tmp/jfk.wav -c:a libopus -f webm /tmp/jfk.webm -y
+          ffmpeg -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono -t 5 /tmp/5s.wav -y
+          ffmpeg -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono -t 30 /tmp/30s.wav -y
+          ls -l /tmp/jfk.wav /tmp/jfk.webm /tmp/5s.wav /tmp/30s.wav
+
+      - name: Measure
+        env:
+          BASELINE: ${{ inputs.baseline_ctx }}
+          CANDIDATE: ${{ inputs.candidate_ctx }}
+          REPEATS: ${{ inputs.repeats }}
+        run: |
+          : > /tmp/results.tsv
+
+          suite() {
+            ctx=$1
+            name="rubai-ctx$ctx"
+            echo "=============================================================="
+            echo "RUBAI_AUDIO_CTX=$ctx"
+            echo "=============================================================="
+            docker run -d --name "$name" \
+              -e STT_SERVICE_TOKEN=ci-token-not-a-real-credential \
+              -e RUBAI_AUDIO_CTX="$ctx" \
+              -p 8080:8080 rubai-stt:latency >/dev/null
+
+            ready_start=$(date +%s)
+            ready=no
+            for attempt in $(seq 1 90); do
+              if [ "$(curl -sS -o /dev/null -w '%{http_code}' \
+                      http://127.0.0.1:8080/health || echo 000)" = "200" ]; then
+                ready=yes; break
+              fi
+              sleep 5
+            done
+            if [ "$ready" != "yes" ]; then
+              echo "::error title=Never became ready::ctx=$ctx"
+              docker logs "$name" | tail -40
+              docker rm -f "$name" >/dev/null
+              exit 1
+            fi
+            echo "ready in $(( $(date +%s) - ready_start ))s"
+            echo
+
+            for sample in jfk.wav jfk.webm 5s.wav 30s.wav; do
+              for repeat in $(seq 1 "$REPEATS"); do
+                start=$(date +%s%3N)
+                code=$(curl -sS -o /tmp/out.json -w '%{http_code}' \
+                       -H "Authorization: Bearer ci-token-not-a-real-credential" \
+                       -F "file=@/tmp/$sample" \
+                       http://127.0.0.1:8080/inference || echo 000)
+                wall=$(( $(date +%s%3N) - start ))
+                if [ "$code" != "200" ]; then
+                  echo "  $sample #$repeat: HTTP $code"
+                  cat /tmp/out.json; echo
+                  echo "::error title=Transcription failed::ctx=$ctx $sample"
+                  docker rm -f "$name" >/dev/null
+                  exit 1
+                fi
+                duration=$(jq -r '.duration_seconds' /tmp/out.json)
+                text=$(jq -r '.text' /tmp/out.json)
+                # Realtime factor: seconds of compute per second of audio.
+                # Below 1.0 is faster than the speech it is transcribing.
+                rtf=$(echo "scale=2; ($wall/1000) / $duration" | bc -l)
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                  "$ctx" "$sample" "$repeat" "$wall" "$duration" "$rtf" "$text" \
+                  >> /tmp/results.tsv
+                printf '  %-10s #%s  wall %6s ms   audio %5ss   rtf %6s   %s\n' \
+                  "$sample" "$repeat" "$wall" "$duration" "$rtf" \
+                  "$(echo "$text" | head -c 70)"
+              done
+            done
+            echo
+            docker stats --no-stream --format "  memory: {{.MemUsage}}" "$name" || true
+            docker rm -f "$name" >/dev/null
+            echo
+          }
+
+          suite "$BASELINE"
+          suite "$CANDIDATE"
+
+      - name: The comparison
+        if: always()
+        env:
+          BASELINE: ${{ inputs.baseline_ctx }}
+          CANDIDATE: ${{ inputs.candidate_ctx }}
+        run: |
+          [ -s /tmp/results.tsv ] || { echo "no results"; exit 1; }
+          python3 - <<'EOF'
+          import os
+          from collections import defaultdict
+
+          base_ctx = os.environ["BASELINE"]
+          cand_ctx = os.environ["CANDIDATE"]
+
+          rows = defaultdict(list)
+          texts = {}
+          for line in open("/tmp/results.tsv"):
+              ctx, sample, repeat, wall, duration, rtf, *rest = line.rstrip("\n").split("\t")
+              rows[(ctx, sample)].append((int(wall), float(duration), float(rtf)))
+              texts[(ctx, sample)] = "\t".join(rest)
+
+          samples = ["jfk.wav", "jfk.webm", "5s.wav", "30s.wav"]
+
+          def best(ctx, sample):
+              measured = rows.get((ctx, sample))
+              if not measured:
+                  return None
+              # The fastest of the repeats: the runner is shared, so the slower
+              # ones carry someone else's load as well as ours.
+              return min(measured, key=lambda item: item[0])
+
+          print()
+          print(f"| sample | audio | ctx={base_ctx} | ctx={cand_ctx} | change | rtf {base_ctx} | rtf {cand_ctx} |")
+          print("|---|---|---|---|---|---|---|")
+          for sample in samples:
+              a, b = best(base_ctx, sample), best(cand_ctx, sample)
+              if not a or not b:
+                  continue
+              change = (b[0] - a[0]) / a[0] * 100
+              print(
+                  f"| `{sample}` | {a[1]:.1f}s | {a[0]} ms | {b[0]} ms | "
+                  f"{change:+.1f}% | {a[2]:.2f} | {b[2]:.2f} |"
+              )
+
+          print()
+          print("Transcripts (fastest repeat of each):")
+          for sample in samples:
+              for ctx in (base_ctx, cand_ctx):
+                  text = texts.get((ctx, sample))
+                  if text is not None:
+                      print(f"  ctx={ctx:>4} {sample:<10} {text[:100]!r}")
+          EOF
