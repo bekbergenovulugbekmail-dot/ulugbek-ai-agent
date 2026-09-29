@@ -39,11 +39,24 @@ jobs:
     steps:
       - name: The backend answers at all
         run: |
+          : > /tmp/failures
           echo "GET $API/health"
           code=$(curl -sS --max-time 20 -o /tmp/health.json -w '%{http_code}' "$API/health" || echo 000)
           echo "  HTTP $code"
           cat /tmp/health.json 2>/dev/null || true
           echo
+          case "$code" in
+            200) echo "VERDICT: the backend is serving." ;;
+            000) echo "VERDICT: no response at all - DNS, TLS or the host is unreachable."
+                 echo "backend unreachable" >> /tmp/failures ;;
+            502|503|504)
+                 echo "VERDICT: HTTP $code comes from the platform edge, not from this"
+                 echo "         application - the container is not serving. Nothing about"
+                 echo "         the frontend can matter until this is fixed."
+                 echo "backend HTTP $code" >> /tmp/failures ;;
+            *)   echo "VERDICT: the application answered with HTTP $code."
+                 echo "backend HTTP $code" >> /tmp/failures ;;
+          esac
 
       - name: The web service answers at all
         run: |
@@ -70,16 +83,31 @@ jobs:
                "$API/health" || true
           grep -iE '^(HTTP/|access-control-|vary)' /tmp/p.txt || echo "  (no CORS headers at all)"
           echo
+          status=$(grep -m1 -i '^HTTP/' /tmp/h.txt | awk '{print $2}')
           allowed=$(grep -i '^access-control-allow-origin' /tmp/h.txt | tr -d '\r' | cut -d' ' -f2- || true)
-          if [ -z "$allowed" ]; then
-            echo "VERDICT: the backend sends no Access-Control-Allow-Origin. A browser on"
-            echo "         $WEB will block every request, which is exactly what"
-            echo "         'Cannot reach the backend' looks like."
-          elif [ "$allowed" = "*" ] || [ "$allowed" = "$WEB" ]; then
-            echo "VERDICT: CORS allows this origin ($allowed). Not the cause."
-          else
-            echo "VERDICT: the backend allows '$allowed', not '$WEB'."
-          fi
+          case "${status:-000}" in
+            502|503|504|000)
+              # A service that does not answer sends no headers of any kind.
+              # Reading that absence as a CORS misconfiguration sends whoever
+              # is debugging it to the wrong file entirely.
+              echo "VERDICT: the backend returned HTTP ${status:-none}, so it sent no"
+              echo "         headers at all. CORS cannot be assessed from this and is"
+              echo "         not the cause. Fix the backend, then re-run this check."
+              ;;
+            *)
+              if [ -z "$allowed" ]; then
+                echo "VERDICT: the backend answered but sent no Access-Control-Allow-Origin."
+                echo "         A browser on $WEB will block every request, which is exactly"
+                echo "         what 'Cannot reach the backend' looks like."
+                echo "CORS: no Access-Control-Allow-Origin" >> /tmp/failures
+              elif [ "$allowed" = "*" ] || [ "$allowed" = "$WEB" ]; then
+                echo "VERDICT: CORS allows this origin ($allowed). Not the cause."
+              else
+                echo "VERDICT: the backend allows '$allowed', not '$WEB'."
+                echo "CORS: allows $allowed, not the web origin" >> /tmp/failures
+              fi
+              ;;
+          esac
 
       # NEXT_PUBLIC_* values are compiled into the JavaScript, so the deployed
       # bundle is the only place the truth about them exists.
@@ -104,10 +132,24 @@ jobs:
           echo
           if grep -q "localhost:8000" /tmp/found.txt 2>/dev/null; then
             echo "VERDICT: the deployed bundle calls localhost. NEXT_PUBLIC_API_BASE_URL"
-            echo "         was missing or wrong when this image was BUILT — changing it"
+            echo "         was missing or wrong when this image was BUILT - changing it"
             echo "         now does nothing until the image is rebuilt."
+            echo "bundle: built against localhost" >> /tmp/failures
           elif grep -qF "$API" /tmp/found.txt 2>/dev/null; then
-            echo "VERDICT: the bundle calls $API — the compiled URL is correct."
+            echo "VERDICT: the bundle calls $API - the compiled URL is correct."
           else
             echo "VERDICT: the bundle does not contain the expected API URL."
+            echo "bundle: unexpected API URL" >> /tmp/failures
           fi
+
+      # A check that stays green while production is down is worse than no
+      # check: it becomes a second thing to disbelieve.
+      - name: Verdict
+        if: always()
+        run: |
+          if [ -s /tmp/failures ]; then
+            echo "The deployment is not healthy:"
+            sed 's/^/  - /' /tmp/failures
+            exit 1
+          fi
+          echo "Frontend and backend agree, and both answer."
