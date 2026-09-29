@@ -129,10 +129,14 @@ jobs:
           python3 - <<'EOF' || true
           import json
           try:
-              auth = json.load(open("/tmp/health.json")).get("auth")
+              health = json.load(open("/tmp/health.json"))
           except Exception:
-              auth = None
-          print(f"0. /health reports auth: {auth}")
+              health = {}
+          print(f"0. /health reports auth: {health.get('auth')}")
+          # Speech, from the same open endpoint. `configured` means the API
+          # holds a provider and a URL -- it is not a probe of the speech
+          # service, which has no public domain and answers nobody out here.
+          print(f"   /health reports stt : {health.get('stt')}")
           EOF
           echo
 
