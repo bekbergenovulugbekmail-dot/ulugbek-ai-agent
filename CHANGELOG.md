@@ -25,12 +25,20 @@ key, no per-minute bill, and the audio never leaves the deployment.
 - **Safari works now.** ffmpeg decodes whatever the browser recorded, so
   `audio/mp4` joins the containers the console records and the backend accepts.
 
-**Measured, and the number is the headline: ~21 seconds per transcription** on
-4 vCPU — and the same 21 seconds for five seconds of audio as for thirty,
-because Whisper's encoder always runs over a 30-second window. With the agent's
-own ~9 s that is half a minute from speaking to hearing an answer.
-`docs/RUBAI_STT.md` has the measurements and the four ways out, cheapest first.
-Nothing was shipped pretending otherwise.
+**Measured, twice, and the second run corrected the first.** The same image on
+the same sample took 21,493 ms on one runner and 12,037 ms on another, so the
+"~21 seconds" first reported is really "12 to 21 seconds on four shared vCPU".
+Only comparisons made inside a single run are worth anything, which is what the
+latency harness does.
+
+**Shortening Whisper's encoder context halves the time** — −48.5% on 11 s of
+speech, −50.9% on a 5 s clip, with byte-identical transcripts. It is still not
+the default: 768 positions hear 15.4 seconds, `STT_MAX_SECONDS` accepts 60, and
+the 22-second sample came back different. The service refuses to start when the
+context cannot reach the end of a recording it would accept, so the 50% can be
+taken deliberately — `RUBAI_AUDIO_CTX=768` with `STT_MAX_SECONDS=15` — and not
+by accident. `docs/RUBAI_STT.md` has every number and VAD as the next
+candidate, documented rather than implemented.
 
 Two things the same run showed: the Uzbek fine-tune still transcribes English
 correctly, and it hallucinates the word "musiqa" over silence.

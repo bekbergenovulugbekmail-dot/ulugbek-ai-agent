@@ -188,14 +188,23 @@ What was verified, not assumed:
   the message and the traceback, so the route logs the exception type alone.
 - 395 backend tests, 83 frontend tests, typecheck, lint and a production build.
 
-### Speech is not fast enough yet
+### Speech is slow, and how slow depends on the machine
 
-Measured on CI run 36560660876 (4 vCPU): **~21 s per transcription, regardless
-of how long the recording is** — Whisper's encoder always runs over a
-30-second window — and 873 MiB of container memory. Correct output, unusable
-latency for conversation. `docs/RUBAI_STT.md` sets out the options: shorten the
-encoder context, more vCPU, a smaller model, or back to a cloud API. That is a
-plan-size decision, not a code one.
+Two CI runs of the same image on the same sample measured **21,493 ms** and
+**12,037 ms** — nothing differed but which runner took the job, so an absolute
+latency from CI is worth ±80% and a Railway container will be its own number
+again. 873 MiB of container memory, which is not the constraint.
+
+**Shortening the encoder context halves it.** Measured on run 36563879708:
+−48.5% on 11 s of speech, −50.9% on a 5 s clip, and identical transcripts —
+for audio that fits inside the shortened window. 768 positions cover 15.4 s,
+and the 22-second sample came back different. So `RUBAI_AUDIO_CTX` stays 0, and
+the service now refuses to start when the context cannot reach the end of a
+recording it would accept: silent truncation is worse than any error.
+
+Taking the 50% means deciding that a spoken command is at most 15 seconds —
+a product decision, in `docs/RUBAI_STT.md` along with the next candidate (VAD,
+documented and not implemented).
 
 ## Pipeline
 

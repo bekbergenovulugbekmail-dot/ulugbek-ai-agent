@@ -46,6 +46,17 @@ logger = logging.getLogger("rubai-stt")
 SAMPLE_RATE: Final[int] = 16_000
 BYTES_PER_SECOND: Final[int] = SAMPLE_RATE * 2
 
+#: Whisper's encoder has 1500 positions covering a 30-second window, so each
+#: position is 1/50th of a second. Shortening the context shortens the window
+#: by exactly that ratio — and audio past the end of it is not transcribed
+#: badly, it is not transcribed at all.
+ENCODER_POSITIONS_PER_SECOND: Final[int] = 50
+
+
+def window_seconds(audio_ctx: int) -> float:
+    """How much audio an encoder context of *audio_ctx* positions can hear."""
+    return 30.0 if audio_ctx <= 0 else audio_ctx / ENCODER_POSITIONS_PER_SECOND
+
 
 def _int(name: str, default: int) -> int:
     try:
@@ -284,6 +295,20 @@ def create_app(
     cfg = config or Config.from_env()
     engine = whisper if whisper is not None else WhisperServer(cfg)
     gate = asyncio.Semaphore(cfg.concurrency)
+
+    # A shortened encoder context that cannot reach the end of an accepted
+    # recording is silent data loss: the request succeeds, the transcript looks
+    # plausible, and the last half of what was said is simply absent. Measured:
+    # at 768 the same sentence twice over came back a different number of
+    # times. Refusing to start is the only honest response to a configuration
+    # that can lose words without saying so.
+    if cfg.audio_ctx > 0 and cfg.max_seconds > window_seconds(cfg.audio_ctx):
+        raise RuntimeError(
+            f"RUBAI_AUDIO_CTX={cfg.audio_ctx} hears only "
+            f"{window_seconds(cfg.audio_ctx):.1f}s of audio, but "
+            f"STT_MAX_SECONDS={cfg.max_seconds:g} accepts longer recordings. "
+            "Lower STT_MAX_SECONDS to match, or raise the context."
+        )
 
     if cfg.token is None and not cfg.allow_anonymous:
         # Refusing to start beats starting open. This service holds a model

@@ -29,13 +29,18 @@ something different:
 
 | | Effect | Cost |
 |---|---|---|
-| `RUBAI_AUDIO_CTX=768` on the speech service | The biggest lever — the padding *is* the cost | Accuracy, unmeasured on Uzbek |
+| `RUBAI_AUDIO_CTX=768` + `STT_MAX_SECONDS=15` | **Measured: half the time**, transcripts identical for audio that fits | A spoken command may be at most 15 seconds |
+| VAD (`--vad`) | Drops silence before the encoder sees it; would likely also fix `musiqa` | A second model and checksum. Not implemented, not measured |
 | More vCPU on that service | Scales to roughly 8 threads | Money, monthly, continuously |
 | A Whisper **small** fine-tune | ~3× faster, ~250 MiB | Worse on Uzbek, which is why it was fine-tuned |
 | Back to a cloud API | Fast, nothing always-on | A per-minute bill, and the audio leaves the deployment |
 
-Try `RUBAI_AUDIO_CTX=768` first: it is free, reversible, and
-`.github/workflows/rubai-stt.yml` measures the result on every push.
+The first row is measured, not estimated: −48.5% on 11 s of speech and −50.9%
+on a 5 s clip, with byte-identical output. It is not the default because 768
+positions hear only 15.4 seconds and the recording limit is 60 — the service
+now refuses to start with that combination rather than silently dropping the
+end of a sentence. Setting both together is the decision: **is a spoken command
+ever longer than fifteen seconds?**
 
 ## Deploy the speech service
 

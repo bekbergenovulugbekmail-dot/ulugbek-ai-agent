@@ -379,6 +379,37 @@ def test_every_flag_is_passed_as_a_flag_and_every_option_with_a_value() -> None:
     assert argv[argv.index("--host") + 1] == "127.0.0.1"
 
 
+def test_a_context_that_cannot_hear_the_whole_recording_refuses_to_start() -> None:
+    """Measured: at 768 a 22-second clip came back different from the baseline.
+
+    768 positions cover 15.4 seconds. A service that accepts 60 and hears 15
+    does not fail — it answers with a plausible transcript that is missing the
+    end, which is worse than any error.
+    """
+    with pytest.raises(RuntimeError, match="RUBAI_AUDIO_CTX"):
+        service.create_app(
+            make_config(audio_ctx=768, max_seconds=60.0),
+            whisper=FakeWhisper(),  # type: ignore[arg-type]
+        )
+
+
+def test_a_context_that_covers_the_limit_is_accepted() -> None:
+    app = service.create_app(
+        make_config(audio_ctx=768, max_seconds=15.0),
+        whisper=FakeWhisper(),  # type: ignore[arg-type]
+    )
+
+    assert app is not None
+
+
+def test_the_window_is_the_ratio_whisper_actually_uses() -> None:
+    # 1500 positions over 30 seconds.
+    assert service.window_seconds(0) == 30.0
+    assert service.window_seconds(1500) == 30.0
+    assert service.window_seconds(768) == pytest.approx(15.36)
+    assert service.window_seconds(512) == pytest.approx(10.24)
+
+
 def test_the_encoder_context_reaches_the_model_when_it_is_set() -> None:
     engine = service.WhisperServer(make_config(audio_ctx=768))
     argv = engine.argv()

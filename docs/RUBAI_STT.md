@@ -65,62 +65,100 @@ not been re-tested here.
 
 ---
 
-## Resources — measured, and the number is a problem
+## Resources — measured
 
-`.github/workflows/rubai-stt.yml` run **36560660876**, 2026-09-29, on a GitHub
-runner with **4 vCPU**:
+Two runs of `.github/workflows/rubai-stt-latency.yml` on GitHub runners
+(4 vCPU), same image, same samples.
 
-| | |
+### The absolute numbers move with the runner
+
+The same image transcribing the same 11-second file:
+
+| run | baseline latency |
 |---|---|
-| Container memory, model loaded and idle | **873 MiB** |
-| `jfk.wav`, 11 s of speech | **21,355 ms** — transcribed correctly |
-| `jfk.webm`, the same audio as Opus (what a browser sends) | **21,306 ms** — identical text |
-| 5 s of silence | **20,471 ms** |
-| 30 s of silence | **20,463 ms** |
+| 36560660876 | **21,493 ms** |
+| 36563879708 | **12,037 ms** |
 
-Read the last three rows together. **Latency does not depend on how long the
-recording is.** Whisper's encoder always runs over a 30-second window, so a
-two-second "loyihalarimni ko'rsat" costs what half a minute of speech costs.
+Nothing changed between them but which machine picked up the job. **Any single
+absolute latency from CI is worth ±80%**, so the earlier "~21 s" should be read
+as "somewhere between 12 and 21 seconds on four shared vCPU" and a Railway
+container will be its own number again. What *is* trustworthy is a comparison
+made inside one run, on one machine, one container after another — which is
+what the harness does and why it does it that way.
 
-**At ~21 s per transcription this is too slow to talk to.** The agent itself
-takes about 9 s for a simple run, so a voice command would be roughly half a
-minute from speaking to hearing an answer. Nothing about the code fixes that;
-it is the model, the CPU count and the encoder window. The options, cheapest
-first:
+Container memory, model loaded and idle: **873 MiB**.
 
-| Change | Effect | Cost |
-|---|---|---|
-| `RUBAI_AUDIO_CTX=768` (or 512) | Shortens the encoder window. The single biggest lever — the padding is the cost | Some accuracy, **unmeasured on Uzbek**. Off by default for that reason |
-| More vCPU on the service | whisper.cpp scales with threads to roughly 8 | Money, per month, continuously |
-| Whisper **small** fine-tune instead of medium | ~3× faster, ~250 MiB | Noticeably worse on Uzbek, which is the language that needed a fine-tune |
-| Back to a cloud API | Fast, no always-on container | A per-minute bill and the audio leaves the deployment. One settings line: the provider is an interface |
+### Shortening the encoder window: ctx=0 against ctx=768
 
-Two smaller findings from the same run, both worth knowing:
+Run **36563879708**, fastest of two repeats each:
 
-- The English test sentence came back **correct**, so the Uzbek fine-tune keeps
-  its English. Mixed Uzbek-English commands are not obviously doomed.
-- Silence came back as **"musiqa"**. Whisper hallucinates on empty audio; the
-  console should not send a recording with no speech in it, and this is why
-  whisper.cpp ships a VAD option that is worth turning on next.
+| sample | audio | ctx=0 | ctx=768 | change | rtf ctx=0 | rtf ctx=768 |
+|---|---|---|---|---|---|---|
+| `jfk.wav` (speech) | 11.0 s | 12,037 ms | 6,203 ms | **−48.5%** | 1.09 | 0.56 |
+| `jfk.webm` (same, Opus — the browser path) | 11.0 s | 12,366 ms | 6,226 ms | **−49.7%** | 1.12 | 0.56 |
+| `jfk-long.wav` (the same speech twice) | 22.0 s | 12,413 ms | 7,343 ms | **−40.8%** | 0.56 | 0.33 |
+| silence | 5.0 s | 12,036 ms | 5,909 ms | **−50.9%** | 2.40 | 1.18 |
+| silence | 30.0 s | 12,004 ms | 5,932 ms | **−50.6%** | 0.40 | 0.19 |
 
-What the shape of the problem dictates, regardless of the machine:
+The realtime factor is seconds of compute per second of audio. Below 1.0 is
+faster than the speech being transcribed; the 5-second row is the one that
+matters for a spoken command, and 768 takes it from 2.40 to 1.18.
 
-- **Whisper pads every clip to 30 seconds.** A three-second command costs the
-  same encoder pass as a thirty-second one, so latency does not shrink with
-  short audio. This is the single most surprising thing about the cost model.
-- **One inference at a time.** `RUBAI_CONCURRENCY` defaults to 1: the working
-  set is held for the length of an inference, two at once doubles it on a
-  container sized for one, and the second request is no faster for having
-  started earlier. Past the limit the service answers 503 rather than swapping.
-- **Cold start is a model load**, not a container start. The weights are baked
-  into the image, so it is a read from local disk — but the health endpoint
-  stays 503 until the model has answered a warm-up request, so Railway does not
-  route traffic at a container that cannot serve it.
+**Roughly half the time, on every sample.** The first comparison
+(36562868898, on the slower runner) found −49.7%, −49.9%, −51.1% and −50.9% on
+the four samples it had. The effect reproduces across runners even though the
+absolute numbers do not.
 
-**Memory is not the constraint; time is.** 873 MiB idle fits a small container
-comfortably. It is the 21 seconds that decides whether this is a voice
-assistant or a form of patience, and that is a plan-size and model-size
-question rather than a code one.
+### What it cost
+
+| sample | transcript |
+|---|---|
+| `jfk.wav`, `jfk.webm` | **identical**, 108 → 108 characters |
+| silence, 5 s and 30 s | **identical** — `musiqa` in both. The hallucination on silence is unchanged, neither better nor worse |
+| `jfk-long.wav` | **changed**, 108 → 435 characters |
+
+That last row is the finding. 768 encoder positions cover **15.4 seconds** —
+Whisper's encoder has 1500 positions over a 30-second window, so the window
+shrinks by exactly that ratio. The 11-second samples fit inside it and came
+back untouched; the 22-second one did not, and the two configurations disagreed
+about it. (The sample is the same sentence twice, so it is a poor measure of
+*which* answer is better — the baseline collapsed the repetition, 768 emitted
+it several times. It is a decisive measure of *that they differ*, which is the
+question that matters here.)
+
+### So: not the default, and now impossible to set unsafely
+
+`RUBAI_AUDIO_CTX` stays **0**. Audio past the shortened window is not
+transcribed badly — it is not transcribed at all, and the request still
+succeeds with a plausible-looking transcript that is missing its end. Making
+that the default while `STT_MAX_SECONDS` accepts 60 would be shipping silent
+data loss in exchange for a latency number.
+
+The service now **refuses to start** when the context cannot reach the end of a
+recording it would accept, naming both variables. So the way to take the 50% is
+to take it deliberately:
+
+```
+RUBAI_AUDIO_CTX=768
+STT_MAX_SECONDS=15        # 768 / 50 — the service checks this arithmetic
+```
+
+Fifteen seconds is a long spoken command, so for this console that may well be
+the right trade. It is a decision about what the product accepts, not a tuning
+knob, which is why it is not made here.
+
+### The next candidate: VAD
+
+Not implemented, and not measured. whisper.cpp v1.9.4 ships voice activity
+detection (`--vad`, with `--vad-model`). It addresses the same waste from the
+other end: instead of shortening the window, it drops the silence inside it, so
+a two-second command carries two seconds of audio into the encoder rather than
+thirty. It should compose with a shortened context rather than compete with it,
+and it would likely also fix `musiqa` — there is nothing to hallucinate over if
+the silence never reaches the model.
+
+It needs a second model file (a few MB), a second pinned checksum, and its own
+run of this harness. Worth doing next; not done here.
 
 ---
 
@@ -147,7 +185,9 @@ STT_MAX_BYTES=10485760
 STT_MAX_SECONDS=60
 RUBAI_CONCURRENCY=1
 WHISPER_THREADS=<defaults to the container's CPU count>
-RUBAI_AUDIO_CTX=0            # 768 or 512 trades accuracy for a much shorter wait
+RUBAI_AUDIO_CTX=0            # 768 halves the latency but hears only 15.4s;
+                             # the service refuses to start unless
+                             # STT_MAX_SECONDS is lowered to match
 ```
 
 Neither value is ever sent to the browser. The console talks to the API, the
