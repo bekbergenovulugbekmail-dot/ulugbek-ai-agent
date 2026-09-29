@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ulugbek_ai.agent.engine import AgentEngine
 from ulugbek_ai.agent.runner import BackgroundAgentRunner
 from ulugbek_ai.config.settings import Settings, get_settings
+from ulugbek_ai.llm.claude import workspace_id_problem
 from ulugbek_ai.core.errors import ConfigurationError
 from ulugbek_ai.database.session import Database, get_database
 from ulugbek_ai.events.service import EventService
@@ -59,6 +60,20 @@ def llm_dependency(request: Request) -> LLMClient:
     """The shared LLM client created during application startup."""
     client: LLMClient | None = getattr(request.app.state, "llm", None)
     if client is None:
+        # Say which piece of configuration is missing. "Set ANTHROPIC_API_KEY"
+        # is wrong and costly advice when the key is fine and the workspace id
+        # is the problem.
+        settings: Settings | None = getattr(request.app.state, "settings", None)
+        problem = (
+            workspace_id_problem(settings.anthropic_workspace_id)
+            if settings is not None
+            else None
+        )
+        if problem is not None:
+            raise ConfigurationError(
+                f"ANTHROPIC_WORKSPACE_ID is not usable: {problem}. Correct it "
+                "and restart the application."
+            )
         raise ConfigurationError(
             "The LLM client is not configured. Set ANTHROPIC_API_KEY and "
             "restart the application."

@@ -109,12 +109,13 @@ class Settings(BaseSettings):
     # ---------------------------------------------------------------- helpers #
     @field_validator(
         "anthropic_api_key",
+        "anthropic_workspace_id",
         "github_token",
         "railway_token",
         mode="before",
     )
     @classmethod
-    def _blank_secret_is_absent(cls, value: Any) -> Any:
+    def _blank_credential_is_absent(cls, value: Any) -> Any:
         """A blank variable means unset — not "a credential that is empty".
 
         Hosting platforms make this the common case rather than the edge one:
@@ -125,14 +126,25 @@ class Settings(BaseSettings):
         instead of the "not configured" state every consumer already handles
         and reports.
 
-        Surrounding whitespace is stripped for the same reason: no credential
-        has meaningful leading or trailing space, but a value pasted with a
-        newline is otherwise rejected by the provider with a message about the
-        key being invalid.
+        Surrounding whitespace and matching quotes are stripped for the same
+        reason: no credential or identifier has meaningful leading space or
+        wrapping quotes, but a value pasted with a newline, or copied with the
+        quotes around it, is otherwise sent verbatim and rejected by the
+        provider with a message about the value being invalid — which reads as
+        a wrong value rather than a badly pasted one.
+
+        The workspace id is normalized here too, not only the secrets: it also
+        travels in a header, where a stray space is just as fatal and just as
+        invisible.
         """
-        if isinstance(value, str):
-            return value.strip() or None
-        return value
+        if not isinstance(value, str):
+            return value
+        cleaned = value.strip()
+        for quote in ('"', "'"):
+            if len(cleaned) >= 2 and cleaned[0] == quote and cleaned[-1] == quote:
+                cleaned = cleaned[1:-1].strip()
+                break
+        return cleaned or None
 
     @field_validator("database_url")
     @classmethod

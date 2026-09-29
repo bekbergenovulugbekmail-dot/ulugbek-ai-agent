@@ -17,6 +17,12 @@ import pytest
 from starlette.testclient import TestClient
 
 from ulugbek_ai.config.settings import Settings
+from ulugbek_ai.core.errors import ConfigurationError
+from ulugbek_ai.llm.claude import (
+    WORKSPACE_HEADER,
+    ClaudeClient,
+    workspace_id_problem,
+)
 from ulugbek_ai.main import build_llm_client, create_app
 
 
@@ -185,3 +191,124 @@ def test_a_transient_database_failure_is_retried() -> None:
     assert "attempt 1/3" in result.stdout
     assert "attempt 3/3" in result.stdout
     assert "retrying in" in result.stderr
+
+
+# --------------------------------------------------------------------------- #
+# The Anthropic workspace id
+# --------------------------------------------------------------------------- #
+WORKSPACE = "wrkspc_01ABCdef23456789"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["", "   ", "\n", '""', "''", "'  '"],
+)
+def test_a_blank_or_quoted_workspace_id_reads_as_unset(raw: str) -> None:
+    """A dashboard variable is as often blank or quote-wrapped as it is right."""
+    assert settings_with(anthropic_workspace_id=raw).anthropic_workspace_id is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [f"  {WORKSPACE}\n", f'"{WORKSPACE}"', f"'{WORKSPACE}'", f'" {WORKSPACE} "'],
+)
+def test_a_pasted_workspace_id_is_cleaned_up(raw: str) -> None:
+    """The value travels in a header, where a stray space is fatal and unseen."""
+    assert settings_with(anthropic_workspace_id=raw).anthropic_workspace_id == WORKSPACE
+
+
+@pytest.mark.parametrize("value", [None, WORKSPACE, "wrkspc_a-b_c"])
+def test_a_usable_workspace_id_reports_no_problem(value: str | None) -> None:
+    assert workspace_id_problem(value) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "fragment"),
+    [
+        ("", "empty"),
+        ("wrkspc_a b", "whitespace"),
+        ('"wrkspc_a"', "quotes"),
+        ("wrkspc_ünicode", "cannot travel in a header"),
+        ("org_01ABCdef", "wrkspc_"),
+        ("account-123", "wrkspc_"),
+    ],
+)
+def test_a_malformed_workspace_id_says_what_is_wrong(
+    value: str, fragment: str
+) -> None:
+    problem = workspace_id_problem(value)
+
+    assert problem is not None
+    assert fragment in problem
+
+
+def test_a_malformed_workspace_id_is_caught_before_any_request() -> None:
+    """The regression: it used to be caught by Anthropic, mid-run, as a 400.
+
+    The message named a header the operator never set, on a request they did
+    not know carried one.
+    """
+    with pytest.raises(ConfigurationError) as exc_info:
+        ClaudeClient(api_key="sk-ant-test", workspace_id="org_01ABCdef")
+
+    assert "ANTHROPIC_WORKSPACE_ID" in exc_info.value.message
+    assert "wrkspc_" in exc_info.value.message
+
+
+def test_the_workspace_id_is_never_in_the_message() -> None:
+    """It is an identifier the operator treats as sensitive; keep it out."""
+    secret_looking = "wrkspc_NOT-IN-ANY-MESSAGE"
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        ClaudeClient(api_key="sk-ant-test", workspace_id=f"{secret_looking} ")
+
+    assert secret_looking not in exc_info.value.message
+
+
+def test_a_valid_workspace_id_is_sent_as_the_header() -> None:
+    """The fix must not quietly drop a header the API key requires."""
+    client = ClaudeClient(api_key="sk-ant-test", workspace_id=WORKSPACE)
+
+    sent = client._client.default_headers  # noqa: SLF001 - the point of the test
+    assert sent[WORKSPACE_HEADER] == WORKSPACE
+
+
+def test_no_workspace_header_is_sent_when_none_is_configured() -> None:
+    client = ClaudeClient(api_key="sk-ant-test", workspace_id=None)
+
+    assert WORKSPACE_HEADER not in client._client.default_headers  # noqa: SLF001
+
+
+def test_a_malformed_workspace_id_does_not_take_the_service_down() -> None:
+    """Dying here would hide the explanation behind a platform 502."""
+    settings = settings_with(
+        anthropic_api_key="sk-ant-test", anthropic_workspace_id="org_01ABCdef"
+    )
+
+    assert build_llm_client(settings) is None
+
+    app = create_app(settings)
+    with TestClient(app) as client:
+        body = client.get("/api/health").json()
+
+    assert body["status"] == "ok"
+    assert body["llm"]["workspace"] == {
+        "configured": True,
+        "usable": False,
+        "problem": workspace_id_problem("org_01ABCdef"),
+    }
+
+
+def test_the_agent_endpoint_names_the_workspace_variable() -> None:
+    """Not "set ANTHROPIC_API_KEY" — the key is fine, and that advice costs time."""
+    settings = settings_with(
+        anthropic_api_key="sk-ant-test", anthropic_workspace_id="org_01ABCdef"
+    )
+    app = create_app(settings)
+
+    with TestClient(app) as client:
+        response = client.post("/api/agent/run", json={"message": "hello"})
+
+    assert response.status_code >= 400
+    assert "ANTHROPIC_WORKSPACE_ID" in response.text
+    assert "ANTHROPIC_API_KEY" not in response.text

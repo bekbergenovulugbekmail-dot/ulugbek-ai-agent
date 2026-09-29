@@ -7,6 +7,7 @@ Everything above it depends on :class:`~ulugbek_ai.llm.base.LLMClient`.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Final
 
 import anthropic
@@ -31,6 +32,37 @@ _HIGH_EFFORT_LEVELS = frozenset({"xhigh", "max"})
 
 #: Names the workspace a multi-workspace key should act in.
 WORKSPACE_HEADER = "anthropic-workspace-id"
+
+#: Anthropic workspace ids are opaque, but their shape is documented and they
+#: travel in a header, so anything with a space, a quote or a control character
+#: in it cannot be one.
+_WORKSPACE_ID_RE: Final[re.Pattern[str]] = re.compile(r"^wrkspc_[A-Za-z0-9_-]+$")
+
+
+def workspace_id_problem(value: str | None) -> str | None:
+    """Why *value* cannot be a workspace id, or ``None`` if it could be.
+
+    Checked before the first request rather than after it: sent as-is, a
+    malformed id comes back as an opaque 400 from Anthropic in the middle of a
+    run, naming a header the operator never set by hand. The value itself is
+    never included in the result — it goes into logs and API responses.
+    """
+    if value is None:
+        return None
+    if not value:
+        return "it is empty"
+    if any(character.isspace() for character in value):
+        return "it contains whitespace"
+    if any(character in value for character in ("\"", "'")):
+        return "it is wrapped in quotes"
+    if not value.isascii() or not value.isprintable():
+        return "it contains characters that cannot travel in a header"
+    if not _WORKSPACE_ID_RE.match(value):
+        return (
+            "it is not in the documented form: a workspace id begins with "
+            "'wrkspc_'. An organization id or an account id will not work"
+        )
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -136,10 +168,19 @@ class ClaudeClient(LLMClient):
         self._effort = effort
         self._thinking = thinking
         # A key that spans several workspaces runs in the workspace each request
-        # names; without the header such a key is rejected outright.
-        headers = (
-            {WORKSPACE_HEADER: workspace_id} if workspace_id else None
-        )
+        # names; without the header such a key is rejected outright. A header
+        # that is present but malformed is rejected just as hard, so it is
+        # checked here — before any request — and the message names the
+        # variable rather than the header.
+        problem = workspace_id_problem(workspace_id)
+        if problem is not None:
+            raise ConfigurationError(
+                f"ANTHROPIC_WORKSPACE_ID is not usable: {problem}. Copy it from "
+                "the Anthropic Console under Settings > Workspaces; it looks "
+                "like 'wrkspc_' followed by letters and digits. Leave the "
+                "variable unset if the API key is scoped to a single workspace."
+            )
+        headers = {WORKSPACE_HEADER: workspace_id} if workspace_id else None
         self._client = client or anthropic.AsyncAnthropic(
             api_key=api_key,
             timeout=timeout_seconds,
@@ -230,7 +271,15 @@ class ClaudeClient(LLMClient):
             ) from exc
         except anthropic.APIStatusError as exc:
             message = redact_text(str(exc.message))
-            if "not scoped to a workspace" in message:
+            if "must be a valid workspace" in message.lower():
+                # Anthropic names the header; the operator set a variable.
+                message = (
+                    "ANTHROPIC_WORKSPACE_ID is set but Anthropic does not "
+                    "recognise it. Copy it from the Console under Settings > "
+                    "Workspaces — it looks like 'wrkspc_' followed by letters "
+                    "and digits, and is not the organization or account id."
+                )
+            elif "not scoped to a workspace" in message:
                 # Point at the fix rather than echoing the API's phrasing.
                 message = (
                     "This API key spans several workspaces, so each request "

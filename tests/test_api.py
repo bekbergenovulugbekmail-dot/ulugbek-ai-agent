@@ -33,8 +33,14 @@ async def test_health(client: AsyncClient) -> None:
 
 
 async def test_health_never_leaks_the_api_key(client: AsyncClient) -> None:
+    """An allowlist, so a field carrying a value cannot be added unnoticed."""
     body = (await client.get("/api/health")).json()
-    assert set(body["llm"]) == {"configured", "model"}
+
+    assert set(body["llm"]) == {"configured", "model", "workspace"}
+    # The workspace block reports presence and shape only.
+    assert set(body["llm"]["workspace"]) == {"configured", "usable", "problem"}
+    assert isinstance(body["llm"]["workspace"]["configured"], bool)
+    assert isinstance(body["llm"]["workspace"]["usable"], bool)
 
 
 async def test_tool_listing_exposes_permissions(client: AsyncClient) -> None:

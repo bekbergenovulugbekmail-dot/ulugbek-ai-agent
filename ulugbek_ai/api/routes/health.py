@@ -9,8 +9,19 @@ from sqlalchemy import text
 
 from ulugbek_ai import __version__
 from ulugbek_ai.api.deps import RegistryDep, SessionDep, SettingsDep
+from ulugbek_ai.llm.claude import workspace_id_problem
 
 router = APIRouter(tags=["health"])
+
+
+def _workspace_report(workspace_id: str | None) -> dict[str, Any]:
+    """Presence and shape of the workspace id, with no part of the value."""
+    problem = workspace_id_problem(workspace_id)
+    return {
+        "configured": workspace_id is not None,
+        "usable": problem is None,
+        "problem": problem,
+    }
 
 
 @router.get("/health", summary="Liveness and dependency check")
@@ -38,6 +49,11 @@ async def health(
         "llm": {
             "configured": settings.anthropic_api_key is not None,
             "model": settings.claude_model,
+            # Whether a workspace id is set and whether it *could* be one —
+            # never the value. A key spanning several workspaces is rejected
+            # outright without this, and rejected just as hard with a
+            # malformed one, so both need to be visible from outside.
+            "workspace": _workspace_report(settings.anthropic_workspace_id),
         },
         "tools": {"count": len(registry.list())},
     }

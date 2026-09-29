@@ -20,6 +20,7 @@ from ulugbek_ai.agent.runner import BackgroundAgentRunner
 from ulugbek_ai.api.errors import register_exception_handlers
 from ulugbek_ai.api.router import api_router
 from ulugbek_ai.config.settings import Settings, get_settings
+from ulugbek_ai.core.errors import ConfigurationError
 from ulugbek_ai.database.session import get_database, reset_database
 from ulugbek_ai.llm.claude import ClaudeClient
 from ulugbek_ai.observability.logger import configure_logging
@@ -49,7 +50,14 @@ def build_llm_client(settings: Settings) -> ClaudeClient | None:
             "configuration error until it is provided."
         )
         return None
-    return ClaudeClient.from_settings(settings)
+    try:
+        return ClaudeClient.from_settings(settings)
+    except ConfigurationError as exc:
+        # A malformed workspace id is a configuration problem, not a reason to
+        # take the whole service down: dying here would hide the explanation
+        # behind a platform 502, which is exactly how this was found.
+        logger.warning("Claude client not built: %s", exc.message)
+        return None
 
 
 @asynccontextmanager
