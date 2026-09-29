@@ -32,12 +32,27 @@ RUN git clone --depth 1 --branch "${WHISPER_REF}" \
 
 # Static and without OpenMP: the runtime image then needs no libwhisper, no
 # libggml and no libgomp — just the one binary that gets copied out.
-RUN cmake -B build \
+#
+# GGML_NATIVE=OFF matters more than it looks. ggml defaults to -march=native,
+# which tunes the binary for whatever CPU compiled it — and an image is built
+# on one machine and run on another. A build host with AVX-512 would produce a
+# binary that dies with SIGILL on a runtime host without it, and no test run on
+# the build machine would ever see it. AVX2 is named explicitly instead: every
+# x86-64 server CPU since 2013 has it, and without it whisper medium is
+# noticeably slower.
+ARG TARGETARCH
+RUN EXTRA=""; \
+    if [ "${TARGETARCH:-amd64}" = "amd64" ]; then \
+      EXTRA="-DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON"; \
+    fi; \
+    cmake -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
+        -DGGML_NATIVE=OFF \
         -DGGML_OPENMP=OFF \
         -DWHISPER_BUILD_TESTS=OFF \
         -DWHISPER_BUILD_EXAMPLES=ON \
+        $EXTRA \
     && cmake --build build --config Release -j "$(nproc)" --target whisper-server \
     && strip build/bin/whisper-server
 
@@ -59,9 +74,10 @@ RUN curl -fsSL --retry 3 --retry-delay 5 \
         "https://huggingface.co/${MODEL_REPO}/resolve/${MODEL_COMMIT}/${MODEL_FILE}" \
         -o model.bin \
     && echo "${MODEL_SHA256}  model.bin" | sha256sum -c - \
-    # A GGML file begins with the magic 'ggml'. An HTML error page saved under
+    # A GGML file starts with the magic 0x67676d6c, written little-endian —
+    # so the first four bytes read as "lmgg". An HTML error page saved under
     # the right name passes every check but this one.
-    && test "$(head -c4 model.bin | xxd -p)" = "6c6d6767" \
+    && test "$(head -c4 model.bin)" = "lmgg" \
     && echo "model verified: $(stat -c%s model.bin) bytes"
 
 
