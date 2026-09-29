@@ -84,7 +84,7 @@ How it was checked, rather than assumed:
 - **The Anthropic key is not a user credential.** Sending it as a bearer is
   rejected like any other wrong token.
 - **The token reaches no log**, no error body and no health response.
-- 375 backend tests, 60 frontend tests.
+- 375 backend tests, 67 frontend tests.
 
 ### What cannot be tested here, and why
 
@@ -159,7 +159,7 @@ working one says nothing about the other.
 | Job | What it guards |
 |---|---|
 | Backend | migrations up→down→up on PostgreSQL 16, schema drift, 375 tests, pyflakes |
-| Web Control Center | typecheck, lint, 60 tests, production build |
+| Web Control Center | typecheck, lint, 67 tests, production build |
 | Deploy to Railway | default branch only; waits for `/api/health` to answer `ok` |
 | Deploy the Web Control Center | dormant until `RAILWAY_SERVICE_WEB` is set |
 
@@ -196,10 +196,6 @@ returns `access-control-allow-origin: https://frontend-production-b432.up.railwa
   `/api/health` and that endpoint is open by design. It now reads the `auth`
   block in the response it was already fetching and fails the deploy when the
   deployed service reports no usable token.
-- **The console's error hint is stale.** A configuration error shows the
-  backend's precise message and then, under it, a fixed line recommending
-  `ANTHROPIC_API_KEY` — which contradicts the message whenever something else
-  is at fault.
 - **No project-creation form.** Projects are created through the API.
 - **SSE is cursor polling** at roughly 0.75s, not a push.
 - **`RAILWAY_SERVICE_WEB` is unset**, so CI does not deploy the console; Railway's

@@ -349,7 +349,7 @@ describe("AgentConsole", () => {
     await user.click(screen.getByRole("button", { name: /send/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "The agent is not configured",
+      "The backend is not configured",
     );
     expect(screen.getByText("check erp")).toBeInTheDocument();
   });

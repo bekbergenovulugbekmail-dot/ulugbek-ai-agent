@@ -200,20 +200,135 @@ describe("ToolExecutionCard", () => {
 });
 
 describe("ErrorState", () => {
-  it("explains a missing API key in terms the operator can act on", () => {
+  const configurationError = (message: string) =>
+    new ApiError(message, { code: "configuration_error", status: 503 });
+
+  it("shows the backend's own account of a missing API key", () => {
     render(
       <ErrorState
+        error={configurationError(
+          "The LLM client is not configured. Set ANTHROPIC_API_KEY and restart the application.",
+        )}
+      />,
+    );
+
+    expect(
+      screen.getByText("The backend is not configured"),
+    ).toBeInTheDocument();
+    // Named because the backend named it, not because the console assumed it.
+    expect(screen.getByText(/Set ANTHROPIC_API_KEY/)).toBeInTheDocument();
+  });
+
+  it("shows a workspace error exactly as the backend put it", () => {
+    // The case this was written for: the message is precise and the cause is
+    // not the API key.
+    const message =
+      "ANTHROPIC_WORKSPACE_ID is not usable: it must look like 'wrkspc_' " +
+      "followed by letters and digits. Correct it and restart the application.";
+    render(<ErrorState error={configurationError(message)} />);
+
+    expect(screen.getByText(message)).toBeInTheDocument();
+  });
+
+  it("does not tell the operator to set the API key when the backend did not", () => {
+    // The old hint was fixed text. It contradicted every configuration error
+    // that was not about the key — which is most of them.
+    const { container } = render(
+      <ErrorState
+        error={configurationError(
+          "ANTHROPIC_WORKSPACE_ID is not usable: it must start with wrkspc_.",
+        )}
+      />,
+    );
+
+    expect(container.textContent).not.toMatch(/ANTHROPIC_API_KEY/);
+    expect(container.textContent).not.toMatch(/restart it/i);
+  });
+
+  it("says where a configuration error is fixed without naming a variable", () => {
+    const { container } = render(
+      <ErrorState error={configurationError("The tool registry is not configured.")} />,
+    );
+
+    // A configuration error the backend raises without naming any variable
+    // still gets a usable hint, and the hint still invents nothing.
+    expect(screen.getByText(/lives on the API service/)).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/ANTHROPIC_/);
+    expect(container.textContent).not.toMatch(/AUTH_TOKEN/);
+  });
+
+  it("leaves a refused credential to say its own piece", () => {
+    const { container } = render(
+      <ErrorState
         error={
-          new ApiError("The LLM client is not configured.", {
-            code: "configuration_error",
-            status: 503,
+          new ApiError(
+            "This endpoint requires the operator token. Send it in the Authorization header.",
+            { code: "authentication_required", status: 401 },
+          )
+        }
+      />,
+    );
+
+    expect(screen.getByText("Something went wrong")).toBeInTheDocument();
+    expect(
+      screen.getByText(/requires the operator token/),
+    ).toBeInTheDocument();
+    // Not a configuration problem, so no configuration advice.
+    expect(container.textContent).not.toMatch(/lives on the API service/);
+    expect(container.textContent).not.toMatch(/ANTHROPIC_API_KEY/);
+  });
+
+  it("leaves a forbidden request to say its own piece", () => {
+    const { container } = render(
+      <ErrorState
+        error={
+          new ApiError("You may not decide this approval.", {
+            code: "forbidden",
+            status: 403,
           })
         }
       />,
     );
 
-    expect(screen.getByText("The agent is not configured")).toBeInTheDocument();
-    expect(screen.getByText(/ANTHROPIC_API_KEY/)).toBeInTheDocument();
+    expect(
+      screen.getByText("You may not decide this approval."),
+    ).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/lives on the API service/);
+  });
+
+  it("renders an ordinary agent failure with no hint at all", () => {
+    const { container } = render(
+      <ErrorState
+        error={
+          new ApiError("Agent run 7f3c… not found.", {
+            code: "not_found",
+            status: 404,
+          })
+        }
+      />,
+    );
+
+    expect(screen.getByText("Something went wrong")).toBeInTheDocument();
+    expect(screen.getByText("Agent run 7f3c… not found.")).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/lives on the API service/);
+    expect(container.textContent).not.toMatch(/NEXT_PUBLIC_API_BASE_URL/);
+  });
+
+  it("still helps when the backend cannot be reached at all", () => {
+    render(
+      <ErrorState
+        error={
+          new ApiError("Could not reach the ULUGBEK AI backend.", {
+            code: "network_error",
+          })
+        }
+      />,
+    );
+
+    expect(screen.getByText("Cannot reach the backend")).toBeInTheDocument();
+    expect(
+      screen.getByText(/NEXT_PUBLIC_API_BASE_URL/),
+    ).toBeInTheDocument();
   });
 
   it("offers a retry and calls it", async () => {

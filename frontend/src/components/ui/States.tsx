@@ -83,14 +83,24 @@ export function ErrorState({
   compact?: boolean;
 }) {
   const apiError = error instanceof ApiError ? error : undefined;
+  // "The backend", not "the agent": a configuration error can be the model
+  // credential, the operator token or the runner, and only one of those is the
+  // agent.
   const title = apiError?.isConfiguration
-    ? "The agent is not configured"
+    ? "The backend is not configured"
     : apiError?.code === "network_error"
       ? "Cannot reach the backend"
       : "Something went wrong";
 
+  // The hint says where to fix a thing, never which thing. Every
+  // configuration error the backend raises already names its own variable and
+  // what to do about it — `ANTHROPIC_WORKSPACE_ID`, `AUTH_TOKEN`, the LLM
+  // client, the runner — so a fixed line recommending one of them contradicts
+  // the message directly above it whenever the cause is another. That happened
+  // with the workspace id: the message was exact, the hint pointed at the API
+  // key, and the hint won the reader's attention.
   const hint = apiError?.isConfiguration
-    ? "Set ANTHROPIC_API_KEY on the backend and restart it."
+    ? "That is the backend's own message. The setting it refers to lives on the API service, not in this console."
     : apiError?.code === "network_error"
       ? "Check that the API is running and NEXT_PUBLIC_API_BASE_URL points at it."
       : undefined;

@@ -5,6 +5,22 @@ because a list of verbs is not worth reading later.
 
 ## Unreleased
 
+### The console stops contradicting the backend
+
+`ErrorState` showed the backend's precise configuration message and then, under
+it, a fixed line telling the operator to set `ANTHROPIC_API_KEY` and restart.
+When the cause was something else — the workspace id, which is exactly what
+happened — the two lines disagreed and the fixed one won the reader's
+attention, sending whoever was debugging it at the wrong variable.
+
+The hint now says *where* a configuration error is fixed, never *which*
+setting: every such error the backend raises already names its own variable and
+what to do about it. The title became "The backend is not configured" for the
+same reason — a configuration error can be the model credential, the operator
+token or the runner, and only one of those is the agent. Network,
+authentication and ordinary failures are untouched, and seven regression tests
+hold the line: three of them fail on the old component.
+
 ### The API is no longer open
 
 Until now `require_principal()` returned an operator to everyone who asked.

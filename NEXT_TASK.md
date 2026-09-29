@@ -5,18 +5,7 @@ against the deployed service on 2026-09-29 (`docs/PROJECT_STATE.md` holds the
 evidence). What follows is ordered by what would hurt most if it stayed as it
 is, not by what is most interesting to build.
 
-## 1. The console's error hint contradicts its own message
-
-`ErrorState` shows the backend's precise message and then a fixed line telling
-the operator to set `ANTHROPIC_API_KEY`. When the key is fine and something
-else is wrong — which is what happened with the workspace id — the two lines
-disagree and the fixed one wins the reader's attention. Either drop the hint
-where the message is already specific, or derive it from the error's code.
-
-One-line change; left undone only because the instruction at the time was not
-to touch application code.
-
-## 2. Let the pipeline deploy the console
+## 1. Let the pipeline deploy the console
 
 `RAILWAY_SERVICE_WEB` is unset, so `deploy-web` skips and Railway's own GitHub
 integration deploys the console instead. Both work, but the CI path is the one
@@ -24,13 +13,13 @@ that waits for `/healthz` before calling a deploy done. Setting the variable —
 and `RAILWAY_WEB_HEALTHCHECK_URL` — closes that gap, provided the Railway
 service is not also auto-deploying, or every push deploys twice.
 
-## 3. Watch production rather than visiting it
+## 2. Watch production rather than visiting it
 
 The deployment check is manual. On a schedule it would notice the next silent
 outage — the backend was down for nine days before anyone looked — and the
 `/api/health` body already carries everything such a check needs.
 
-## 4. Creating a project needs the API
+## 3. Creating a project needs the API
 
 There is no form. Every project is created with a POST, which makes the
 Projects page read-only in practice and the GitHub and Railway bindings
