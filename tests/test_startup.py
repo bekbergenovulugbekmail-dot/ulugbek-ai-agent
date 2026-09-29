@@ -9,6 +9,9 @@ enough to say so.
 from __future__ import annotations
 
 import json
+import os
+import pathlib
+import subprocess
 
 import pytest
 from starlette.testclient import TestClient
@@ -122,3 +125,63 @@ def test_a_platform_database_url_is_upgraded_to_the_async_driver(
     assert settings_with(database_url=injected).database_url.startswith(
         "postgresql+asyncpg://"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The container entrypoint
+# --------------------------------------------------------------------------- #
+def run_entrypoint(database_url: str, **env: str) -> subprocess.CompletedProcess[str]:
+    root = pathlib.Path(__file__).resolve().parent.parent
+    return subprocess.run(
+        ["sh", "entrypoint.sh"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={
+            **os.environ,
+            "DATABASE_URL": database_url,
+            "MIGRATION_ATTEMPTS": "1",
+            "MIGRATION_RETRY_SECONDS": "1",
+            **env,
+        },
+    )
+
+
+def test_an_unreachable_database_fails_with_something_to_act_on() -> None:
+    """The failure an operator actually meets, and the one they cannot debug.
+
+    A single failed migration attempt used to exit the container before the
+    server started, so /api/health — built to report `database.connected:
+    false` — never answered and the platform served an opaque 502.
+    """
+    result = run_entrypoint("postgresql+asyncpg://nobody:nothing@127.0.0.1:59999/none")
+
+    assert result.returncode == 1
+    assert "database migrations failed" in result.stderr
+    assert "DATABASE_URL" in result.stderr
+    # It names the variable, never reads it out.
+    assert "the database service is running and reachable" in result.stderr
+
+
+def test_the_database_password_is_never_printed() -> None:
+    """DATABASE_URL carries a password, and this runs in a platform log."""
+    secret = "sup3rs3cret-not-in-any-log"
+    result = run_entrypoint(
+        f"postgresql+asyncpg://someone:{secret}@127.0.0.1:59999/none"
+    )
+
+    assert secret not in result.stderr
+    assert secret not in result.stdout
+
+
+def test_a_transient_database_failure_is_retried() -> None:
+    """A database that is not ready *yet* is the ordinary case, not an error."""
+    result = run_entrypoint(
+        "postgresql+asyncpg://nobody:nothing@127.0.0.1:59999/none",
+        MIGRATION_ATTEMPTS="3",
+    )
+
+    assert "attempt 1/3" in result.stdout
+    assert "attempt 3/3" in result.stdout
+    assert "retrying in" in result.stderr
