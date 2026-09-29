@@ -86,13 +86,23 @@ def speech_to_text_dependency(request: Request) -> SpeechToText:
     stt: SpeechToText | None = getattr(request.app.state, "stt", None)
     if stt is None:
         settings: Settings | None = getattr(request.app.state, "settings", None)
-        if settings is not None and settings.stt_provider == "disabled":
+        provider = getattr(settings, "stt_provider", None)
+        if provider == "disabled":
             raise ConfigurationError(
                 "Speech is switched off: STT_PROVIDER is 'disabled'."
             )
+        # Which variable is missing depends on which provider is configured,
+        # and naming the wrong one costs an operator a restart that changes
+        # nothing. rubai runs in this deployment and needs an address; google
+        # is a cloud API and needs a key.
+        missing = (
+            "STT_SERVICE_URL (and STT_SERVICE_TOKEN)"
+            if provider == "rubai"
+            else "STT_API_KEY"
+        )
         raise ConfigurationError(
-            "Speech-to-text is not configured. Set STT_API_KEY and restart the "
-            "application."
+            f"Speech-to-text is not configured for STT_PROVIDER={provider!r}. "
+            f"Set {missing} and restart the application."
         )
     return stt
 

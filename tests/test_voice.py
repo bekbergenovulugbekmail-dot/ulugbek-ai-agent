@@ -186,7 +186,12 @@ async def test_an_anonymous_caller_is_refused_before_the_provider_is_consulted(
 async def test_transcribe_says_which_variable_is_missing(
     client: AsyncClient,
 ) -> None:
-    """The default fixture configures no speech provider."""
+    """The default fixture configures no speech provider.
+
+    `STT_PROVIDER` defaults to `rubai`, and what rubai is missing is a URL to
+    its own service, not a cloud API key. Naming the wrong variable sends
+    whoever reads it to set something that would change nothing.
+    """
     response = await client.post(
         "/api/voice/transcribe", content=WEBM, headers={"Content-Type": "audio/webm"}
     )
@@ -194,7 +199,57 @@ async def test_transcribe_says_which_variable_is_missing(
     assert response.status_code == 503
     body = response.json()["error"]
     assert body["code"] == "configuration_error"
-    assert "STT_API_KEY" in body["message"]
+    assert "STT_SERVICE_URL" in body["message"]
+    assert "STT_API_KEY" not in body["message"]
+
+
+def test_the_missing_variable_is_the_one_this_provider_actually_needs() -> None:
+    """Each provider is missing something different, and says so.
+
+    This was wrong in production and invisible here: the console told an
+    operator running the rubai provider to set STT_API_KEY, which belongs to
+    Google and which rubai never reads. The message was hard-coded, and the
+    test that covered it asserted the hard-coded string back.
+    """
+    from ulugbek_ai.api.deps import speech_to_text_dependency
+
+    class _State:
+        stt = None
+
+        def __init__(self, settings) -> None:
+            self.settings = settings
+
+    class _App:
+        def __init__(self, settings) -> None:
+            self.state = _State(settings)
+
+    class _Request:
+        def __init__(self, settings) -> None:
+            self.app = _App(settings)
+
+    def message(**overrides) -> str:
+        settings = Settings(
+            _env_file=None,
+            environment="test",
+            auth_token=OPERATOR_TOKEN,
+            database_url=_database_url(),
+            **overrides,
+        )
+        with pytest.raises(UlugbekError) as caught:
+            speech_to_text_dependency(_Request(settings))  # type: ignore[arg-type]
+        return str(caught.value)
+
+    rubai = message(stt_provider="rubai")
+    assert "STT_SERVICE_URL" in rubai
+    assert "STT_SERVICE_TOKEN" in rubai
+    assert "STT_API_KEY" not in rubai
+
+    google = message(stt_provider="google")
+    assert "STT_API_KEY" in google
+    assert "STT_SERVICE_URL" not in google
+
+    off = message(stt_provider="disabled")
+    assert "disabled" in off
 
 
 async def test_speak_reports_that_the_console_synthesises_locally(

@@ -1,10 +1,12 @@
 /**
  * Speech, through the backend.
  *
- * The browser never holds a transcription key and never talks to a provider:
- * it posts the recording to this service, which holds `STT_API_KEY` and makes
- * the call. Every `NEXT_PUBLIC_*` value is compiled into the bundle and is
- * therefore public, so there is no version of this where the key lives here.
+ * The browser never holds a transcription credential and never talks to a
+ * provider: it posts the recording to this service, which holds whichever one
+ * the configured provider needs -- `STT_SERVICE_TOKEN` for the speech service
+ * running beside it, `STT_API_KEY` for Google -- and makes the call. Every
+ * `NEXT_PUBLIC_*` value is compiled into the bundle and is therefore public,
+ * so there is no version of this where either lives here.
  */
 
 import type { Clip } from "@/lib/voice/recorder";
