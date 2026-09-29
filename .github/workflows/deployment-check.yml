@@ -23,6 +23,11 @@ on:
         description: "API base URL, including /api"
         required: true
         default: "https://ulugbek-ai-agent-production.up.railway.app/api"
+      agent_request:
+        description: "Also send one real agent request (creates a run, spends tokens)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -140,6 +145,36 @@ jobs:
           else
             echo "VERDICT: the bundle does not contain the expected API URL."
             echo "bundle: unexpected API URL" >> /tmp/failures
+          fi
+
+      # Everything above tests the plumbing. This tests the thing the
+      # plumbing is for, and is the only step that reaches Anthropic — so
+      # it is opt-in: it creates a run and spends tokens.
+      - name: One real agent request, end to end
+        if: inputs.agent_request
+        run: |
+          echo "POST $API/agent/run  (Origin: $WEB)"
+          code=$(curl -sS --max-time 180 -o /tmp/run.json -w '%{http_code}' \
+                 -X POST "$API/agent/run" \
+                 -H 'content-type: application/json' \
+                 -H "Origin: $WEB" \
+                 -d '{"message":"Reply with the single word: pong."}' || echo 000)
+          echo "  HTTP $code"
+          python3 -m json.tool < /tmp/run.json 2>/dev/null || cat /tmp/run.json
+          echo
+          # The body is the application's own envelope, already redacted by
+          # it; no credential can reach this log through it.
+          status=$(python3 -c "import json;print(json.load(open('/tmp/run.json')).get('status',''))" 2>/dev/null || true)
+          if [ "$status" = "COMPLETED" ]; then
+            echo "VERDICT: the agent reached Anthropic and answered. End to end works."
+          elif [ "$code" = "200" ] || [ "$code" = "202" ]; then
+            echo "VERDICT: the run was created but did not complete (status ${status:-unknown})."
+            echo "         The error field above is the real reason."
+            echo "agent run did not complete" >> /tmp/failures
+          else
+            echo "VERDICT: the request never became a run (HTTP $code). The message"
+            echo "         above names the configuration that stopped it."
+            echo "agent request rejected with HTTP $code" >> /tmp/failures
           fi
 
       # A check that stays green while production is down is worse than no
