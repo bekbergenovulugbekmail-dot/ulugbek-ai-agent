@@ -5,6 +5,29 @@ because a list of verbs is not worth reading later.
 
 ## Unreleased
 
+### Deploys stop being cancellable, and the dormant one says what it needs
+
+- **A new push no longer kills a running deploy.** The workflow cancelled any
+  superseded run on any branch, including the branch that deploys — so a push
+  landing during `railway up` or the health wait ended both partway through,
+  and left a run marked with a red X that meant "cancelled", not "broken".
+  That distinction was already misread once here. Working branches keep the
+  fast cancel; the default branch runs to completion.
+- **One deploy per service at a time.** Each deploy job holds its own
+  concurrency group and queues rather than cancels, so two runs cannot race on
+  the same service and land the older commit last. The API and the console have
+  separate groups — they are separate services and need not wait for each other.
+- **The dormant web deploy now says what to set it to.** It had skipped since
+  it was written, telling the operator to set `RAILWAY_SERVICE_WEB` without
+  saying what the value was. It now uses the token it already has to print the
+  names of the services in the project — names are not secret, the token is
+  never printed — so the variable can be copied rather than guessed.
+
+Railway's own GitHub integration has to be off for any service this pipeline
+deploys: with both on, every push deploys twice and the two races decide which
+image ends up live. That is a dashboard setting, and the workflow header says
+so where someone reading it will look.
+
 ### The console stops contradicting the backend
 
 `ErrorState` showed the backend's precise configuration message and then, under

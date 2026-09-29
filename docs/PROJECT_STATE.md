@@ -160,8 +160,19 @@ working one says nothing about the other.
 |---|---|
 | Backend | migrations up→down→up on PostgreSQL 16, schema drift, 375 tests, pyflakes |
 | Web Control Center | typecheck, lint, 67 tests, production build |
-| Deploy to Railway | default branch only; waits for `/api/health` to answer `ok` |
-| Deploy the Web Control Center | dormant until `RAILWAY_SERVICE_WEB` is set |
+| Deploy to Railway | default branch only; waits for `/api/health` to answer `ok`, and fails if the deployed service has no usable token |
+| Deploy the Web Control Center | default branch only; waits for `/healthz`. Dormant until `RAILWAY_SERVICE_WEB` is set — while it is unset the job prints the names of the services the token can reach, so the value is copied rather than guessed |
+
+Deploys are not cancelled. The workflow still cancels a superseded run on a
+working branch, but never on the branch that deploys: cancelling there kills
+`railway up` or the health wait partway through and leaves a red X that means
+"cancelled" rather than "broken" — a distinction already misread once here.
+Each deploy job also holds its own concurrency group, so two runs never deploy
+the same service at the same time; the later one waits rather than racing.
+
+**Railway's own GitHub integration must be off for any service this pipeline
+deploys.** Both paths work alone; with both on, every push deploys twice and
+the two races decide which image ends up live.
 
 `.github/workflows/deployment-check.yml` is manual: it looks at production the
 way a browser does — the API URL compiled into the deployed bundle, the CORS

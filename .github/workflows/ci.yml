@@ -19,6 +19,13 @@
 #   Variables -> RAILWAY_SERVICE_WEB           the web service (name or id)
 #   Variables -> RAILWAY_WEB_HEALTHCHECK_URL   optional, e.g.
 #                                https://<your-web>.up.railway.app/healthz
+# While RAILWAY_SERVICE_WEB is unset the job skips and prints the names of the
+# services the token can reach, so the value can be copied rather than guessed.
+#
+# Turn Railway's own GitHub integration OFF for any service deployed from here.
+# Both paths work, but with both on, every push deploys twice: once when
+# Railway sees the commit and once when this job runs, and the two races decide
+# which image ends up live.
 #
 # Note that the web service reads NEXT_PUBLIC_API_BASE_URL from its *Railway*
 # variables, not from here: Next compiles that value into the browser bundle
@@ -32,9 +39,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A new push supersedes an unfinished run — except on the branch that
+# deploys. Cancelling there kills `railway up` or the health wait partway
+# through, which leaves a deployment nobody watched to the end and a run whose
+# red X means "cancelled", not "broken". Those two have been confused here
+# before. Default-branch runs therefore run to completion, and the deploy jobs
+# below queue behind each other instead.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: >-
+    ${{ github.ref_name != github.event.repository.default_branch }}
 
 permissions:
   contents: read
@@ -141,6 +155,13 @@ jobs:
     # a required reviewer can be added later to put a human back in the loop.
     environment: production
 
+    # One deploy of this service at a time. Two `railway up` runs racing on the
+    # same service is how a later commit ends up live before an earlier one.
+    # Not cancelled: a queued deploy waits for the running one to finish.
+    concurrency:
+      group: deploy-api
+      cancel-in-progress: false
+
     steps:
       - uses: actions/checkout@v5
 
@@ -219,6 +240,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
 
+    # Its own group, so a console deploy and an API deploy do not block each
+    # other — they are separate services.
+    concurrency:
+      group: deploy-web
+      cancel-in-progress: false
+
     defaults:
       run:
         # `railway up` uploads the working directory, and the web service is
@@ -235,14 +262,62 @@ jobs:
           RAILWAY_SERVICE_WEB: ${{ vars.RAILWAY_SERVICE_WEB }}
         run: |
           if [ -z "${RAILWAY_TOKEN}" ]; then
+            echo "token=false" >> "$GITHUB_OUTPUT"
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Web deploy skipped::RAILWAY_TOKEN is not set."
           elif [ -z "${RAILWAY_SERVICE_WEB}" ]; then
+            echo "token=true" >> "$GITHUB_OUTPUT"
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Web deploy skipped::RAILWAY_SERVICE_WEB is not set. Add the web service name or id as a repository variable."
           else
+            echo "token=true" >> "$GITHUB_OUTPUT"
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
+
+      # "Set a variable" is a dead end when you do not know what to set it to,
+      # and this job has been skipped for exactly that reason since it was
+      # written. The token already here can answer the question: service names
+      # are not secret, and the token itself is never printed.
+      - name: Name the services this token can deploy
+        if: steps.guard.outputs.token == 'true' && steps.guard.outputs.configured != 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          npm install -g @railway/cli@5 >/dev/null 2>&1 || true
+          railway status --json > /tmp/status.json 2>/dev/null || true
+          python3 - <<'PYEOF'
+          import json
+
+          def names(node, inside=False):
+              # Every "name" under anything called "services", at any depth.
+              found = []
+              if isinstance(node, dict):
+                  for key, value in node.items():
+                      if key == "name" and inside and isinstance(value, str):
+                          found.append(value)
+                      found += names(value, inside or key == "services")
+              elif isinstance(node, list):
+                  for item in node:
+                      found += names(item, inside)
+              return found
+
+          try:
+              found = sorted(set(names(json.load(open("/tmp/status.json")))))
+          except Exception:
+              found = []
+
+          if found:
+              print("Services in this Railway project:")
+              for name in found:
+                  print(f"  {name}")
+              print()
+              print("Set the web one as the RAILWAY_SERVICE_WEB repository variable")
+              print("(Settings -> Secrets and variables -> Actions -> Variables),")
+              print("and this job will deploy it.")
+          else:
+              print("Could not read the service list from Railway. Open the project")
+              print("in the dashboard and copy the web service's name.")
+          PYEOF
 
       - name: Install the Railway CLI
         if: steps.guard.outputs.configured == 'true'

@@ -5,13 +5,24 @@ against the deployed service on 2026-09-29 (`docs/PROJECT_STATE.md` holds the
 evidence). What follows is ordered by what would hurt most if it stayed as it
 is, not by what is most interesting to build.
 
-## 1. Let the pipeline deploy the console
+## 1. Two settings, and the pipeline deploys the console
 
-`RAILWAY_SERVICE_WEB` is unset, so `deploy-web` skips and Railway's own GitHub
-integration deploys the console instead. Both work, but the CI path is the one
-that waits for `/healthz` before calling a deploy done. Setting the variable —
-and `RAILWAY_WEB_HEALTHCHECK_URL` — closes that gap, provided the Railway
-service is not also auto-deploying, or every push deploys twice.
+Everything in the repository is done: the job is written, gated on the frontend
+suite, waits for `/healthz`, queues rather than races, and — while it is still
+dormant — prints the names of the services the Railway token can reach, so
+there is nothing to guess. What is left is outside the repository:
+
+1. **Settings → Secrets and variables → Actions → Variables**: add
+   `RAILWAY_SERVICE_WEB` (the web service's name, as the skipped job prints it)
+   and `RAILWAY_WEB_HEALTHCHECK_URL`
+   (`https://<your-web>.up.railway.app/healthz`).
+2. **Railway → the web service → Settings**: turn its GitHub integration off.
+   Both deploy paths work alone; with both on, every push deploys twice and the
+   two races decide which image ends up live.
+
+Do them in that order and the next default-branch push deploys the console
+through CI, which is the path that refuses to call a deploy done before the
+service answers.
 
 ## 2. Watch production rather than visiting it
 
