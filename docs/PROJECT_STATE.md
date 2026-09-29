@@ -53,7 +53,10 @@ Re-run it yourself: **Actions → Deployment check → Run workflow**, with
 
 ## Authentication
 
-Implemented on this branch. **Not live yet** — see *Known gaps*.
+**Live, and currently refusing everything.** This branch is the repository's
+default branch, so pushing it deployed it; `AUTH_TOKEN` is not set on the
+Railway API service, so the API answers 503 to every route but health. Setting
+that one variable is the whole remedy — see *Known gaps*.
 
 The model is one shared operator token, chosen because this deployment has one
 operator: a user table, sessions and password reset would be machinery around a
@@ -122,11 +125,19 @@ returns `access-control-allow-origin: https://frontend-production-b432.up.railwa
 
 ## Known gaps
 
-- **Production is still open.** Authentication exists on this branch and is
-  not deployed: until `AUTH_TOKEN` is set on the Railway API service and the
-  default branch ships it, anyone who finds the API can run the agent. Setting
-  the variable first is not optional — deploying without it turns every route
-  but health into a 503.
+- **Production is deployed without its token.** Confirmed from a GitHub
+  runner on 2026-09-29: `/api/system/overview` without a header answers
+  **HTTP 503**, and `/api/health` reports `auth: {configured: false,
+  usable: false}`. The service is up and the console can reach it; it is
+  refusing everything because it has no credential to check against. Set
+  `AUTH_TOKEN` on the Railway **API** service and the API serves again — no
+  redeploy needed, since the variable is read at request time.
+
+  The order was supposed to be the other way round. The deploy job is gated on
+  the default branch, and the default branch here *is* the working branch, so
+  the push shipped it. The pipeline now fails the deploy when the deployed
+  service reports no usable token, instead of reporting green while production
+  refuses every request.
 - **The console's error hint is stale.** A configuration error shows the
   backend's precise message and then, under it, a fixed line recommending
   `ANTHROPIC_API_KEY` — which contradicts the message whenever something else

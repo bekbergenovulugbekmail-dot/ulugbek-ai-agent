@@ -186,6 +186,19 @@ jobs:
             if [ "$status" = "200" ] && grep -q '"status"[[:space:]]*:[[:space:]]*"ok"' /tmp/health.json; then
               echo "Healthy after ${attempt} attempt(s):"
               cat /tmp/health.json
+              echo
+              # Healthy is not the same as serving. The API refuses every route
+              # but health when AUTH_TOKEN is missing, and it reports healthy
+              # while doing so — which is how a deploy once left production
+              # answering 503 to the console with a green pipeline behind it.
+              # Parsed rather than grepped: `usable` appears in the workspace
+              # block too, and failing this step for the wrong reason would
+              # send whoever reads it to the wrong variable.
+              usable=$(python3 -c "import json;print(json.load(open('/tmp/health.json')).get('auth',{}).get('usable',True))")
+              if [ "$usable" != "True" ]; then
+                echo "::error title=Deployed without a usable AUTH_TOKEN::The service is up and refusing every route but /api/health. Set AUTH_TOKEN on the Railway API service (at least 32 characters), then re-run this deploy."
+                exit 1
+              fi
               exit 0
             fi
             echo "attempt ${attempt}: not healthy yet (HTTP ${status:-none})"

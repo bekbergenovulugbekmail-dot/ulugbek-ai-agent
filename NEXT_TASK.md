@@ -3,22 +3,22 @@
 Production works end to end. What follows is ordered by what would hurt most
 if it stayed as it is, not by what is most interesting to build.
 
-## 1. Set `AUTH_TOKEN` in Railway, then ship the authentication branch
+## 1. Set `AUTH_TOKEN` in Railway — production is refusing every request
 
-The code is written and tested; production is still open until it is deployed,
-and deploying it in the wrong order breaks the service instead of protecting
-it. The order matters:
+Authentication is deployed and has no token to check against, so the API
+answers 503 to everything but `/api/health`. One variable fixes it, and no
+redeploy is needed: the value is read per request.
 
-1. Generate a token — `python -c "import secrets; print(secrets.token_urlsafe(48))"`
-   — and set `AUTH_TOKEN` on the Railway **API** service. Nothing else changes:
-   the console asks the operator for it in the browser.
-2. Only then merge this branch to the default branch, which deploys it.
-   Deployed without the variable, every route but `/api/health` answers 503 —
-   the service stays healthy while the console shows nothing.
-3. Check it from outside afterwards: `/api/health` still answers without a
-   credential and reports `auth.usable: true`; a protected route answers 401
-   without the header and 200 with it; the console asks for the token once and
-   then runs the agent.
+1. Generate one: `python -c "import secrets; print(secrets.token_urlsafe(48))"`
+2. Railway → the **ulugbek-ai-agent** (API) service → Variables → add
+   `AUTH_TOKEN` with that value. Leave the web service alone; the console asks
+   the operator for the token in the browser.
+3. Verify from outside — **Actions → Deployment check → Run workflow**. It now
+   asks production whether it refuses an anonymous caller, and passes only on
+   401. Then open the console, paste the same token once, and run the agent.
+
+Add the same value as a repository secret named `AUTH_TOKEN` if you want the
+deployment check's optional agent request to work.
 
 Rotating the token later invalidates every stored copy at once, which is the
 whole recovery procedure.
