@@ -327,3 +327,76 @@ async def test_events_are_visible_while_the_run_is_still_going(
     # growing across the run instead of appearing all at once at the end.
     assert observed[0] >= 1
     assert observed[-1] > observed[0]
+
+
+async def test_repeated_runs_return_every_connection_to_the_pool(
+    database, session: AsyncSession, llm: ScriptedLLMClient, registry, settings
+) -> None:
+    """A run that leaks its session is invisible until the pool runs dry.
+
+    The runner opens a session per run, outside the request that started it,
+    so nothing else closes it. A leak of one connection per run shows up only
+    after `pool_size + max_overflow` runs — in production, hours later, as a
+    service that stops answering with nothing in its own logs.
+    """
+    from ulugbek_ai.agent.repository import AgentRunRepository
+
+    checked_out = getattr(database.engine.pool, "checkedout", None)
+    before = checked_out() if checked_out else None
+
+    runner = BackgroundAgentRunner(
+        database, llm=llm, registry=registry, settings=settings
+    )
+    run_ids = []
+
+    # One at a time: concurrent runs would interleave on the scripted client's
+    # shared queue, and this test is about sessions, not scheduling.
+    for index in range(3):
+        llm.queue(plan_reply(("Answer", None, "answered")))
+        llm.queue(text_response(f"Answer {index}."))
+        llm.queue(verdict_reply())
+        run, _ = await engine(session, llm, registry, settings).start(
+            AgentRunRequest(message=f"Question {index}?")
+        )
+        await session.commit()
+        run_ids.append(run.id)
+
+        runner.launch(run.id)
+        for _ in range(400):
+            if runner.active_count == 0:
+                break
+            await asyncio.sleep(0.02)
+        assert runner.active_count == 0
+
+    # Every run finished, so every session reached its exit.
+    async with database.session() as check:
+        runs = AgentRunRepository(check)
+        for index, run_id in enumerate(run_ids):
+            finished = await runs.get(run_id)
+            assert finished.status is RunStatus.COMPLETED
+            assert finished.output == f"Answer {index}."
+
+    if checked_out is not None:
+        # Nothing the runner opened is still held.
+        assert checked_out() == before
+
+
+async def test_one_start_creates_exactly_one_run(
+    session: AsyncSession, llm: ScriptedLLMClient, registry, settings
+) -> None:
+    """A second run on one request would double every bill and side effect."""
+    from ulugbek_ai.agent.repository import AgentRunRepository
+
+    before = len(await AgentRunRepository(session).list(limit=50))
+
+    llm.queue(plan_reply(("Answer", None, "answered")))
+    llm.queue(text_response("Once."))
+    llm.queue(verdict_reply())
+    await engine(session, llm, registry, settings).start(
+        AgentRunRequest(message="A single question.")
+    )
+    await session.commit()
+
+    after = await AgentRunRepository(session).list(limit=50)
+    assert len(after) == before + 1
+    assert sum(1 for run in after if run.input == "A single question.") == 1
