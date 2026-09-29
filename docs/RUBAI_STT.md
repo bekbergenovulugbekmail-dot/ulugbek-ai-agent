@@ -350,15 +350,27 @@ It stays dormant until two things exist, and says which one is missing:
 
 The service has to exist in Railway before this job can deploy to it, and
 creating it in the dashboard is the reliable path: **Empty service**, then
-Settings → Root Directory `services/rubai-stt`, and **no public domain** — the
-whole security argument on this page rests on the model being reachable only
-over Railway's private network. (Whether the project token could create a
+Settings → **Root Directory `services/rubai-stt`**, and **no public domain** —
+the whole security argument on this page rests on the model being reachable
+only over Railway's private network. (Whether the project token could create a
 service itself has not been tested here; `ci.yml` describes it as scoped to one
 environment and able to deploy.)
 
-Run 36577815298 showed the project holding `Postgres`, `frontend` and
-`ulugbek-ai-agent`, and no speech service — so this is the step that is
-outstanding, not a missing variable.
+**That Root Directory setting is load-bearing, and it is the only place the
+subdirectory is chosen.** `railway up` uploads the directory it runs in, and
+Railway then applies the service's Root Directory to whatever arrived — the two
+are not additive. The deploy job therefore runs from the repository root. Doing
+it the other way round, which looks more natural, fails like this:
+
+```
+Deploy failed: Root directory "/services/rubai-stt" was not found in the
+deployed source.
+```
+
+because the upload was the contents of `services/rubai-stt` and Railway went
+looking for that path inside them (run 36587418260, an 18 kB snapshot). If that
+message ever comes back, the question is which of the two ends is selecting the
+subdirectory twice — not whether the path is spelled right.
 
 **There is no health wait in the deploy job**, which is deliberate and not an
 omission. A service with no public domain has no URL for CI to poll. Railway's

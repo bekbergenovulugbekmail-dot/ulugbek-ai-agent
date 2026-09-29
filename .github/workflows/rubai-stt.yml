@@ -189,12 +189,6 @@ jobs:
       group: deploy-stt
       cancel-in-progress: false
 
-    defaults:
-      run:
-        # `railway up` uploads the working directory, and this service is built
-        # from services/rubai-stt/Dockerfile with its railway.json beside it.
-        working-directory: services/rubai-stt
-
     steps:
       - uses: actions/checkout@v5
 
@@ -273,6 +267,19 @@ jobs:
         if: steps.guard.outputs.configured == 'true'
         run: npm install -g @railway/cli@5
 
+      # From the repository root, deliberately. `railway up` uploads the
+      # directory it runs in, and the Railway service applies its own Root
+      # Directory setting to whatever arrives. Running this from
+      # services/rubai-stt uploaded that directory's *contents*, and Railway
+      # then looked for services/rubai-stt inside them:
+      #
+      #   Deploy failed: Root directory "/services/rubai-stt" was not found
+      #   in the deployed source.
+      #
+      # (Run 36587418260, an 18 kB snapshot — the service directory alone.)
+      # The two settings are not additive, so exactly one of them selects the
+      # subdirectory, and it is the one in Railway where an operator can see it
+      # beside the service it belongs to.
       - name: Deploy
         if: steps.guard.outputs.configured == 'true'
         env:
