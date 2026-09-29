@@ -22,6 +22,11 @@
 # While RAILWAY_SERVICE_WEB is unset the job skips and prints the names of the
 # services the token can reach, so the value can be copied rather than guessed.
 #
+# The speech service is a third Railway service and is deployed by
+# .github/workflows/rubai-stt.yml, not from here -- its image takes ten minutes
+# to build and there is no reason to hold the agent's pipeline behind it:
+#   Variables -> RAILWAY_SERVICE_STT            the speech service (name or id)
+#
 # Turn Railway's own GitHub integration OFF for any service deployed from here.
 # Both paths work, but with both on, every push deploys twice: once when
 # Railway sees the commit and once when this job runs, and the two races decide

@@ -332,6 +332,46 @@ into the bundle — so there is no version of this where a token lives there.
 
 ---
 
+## Deploying it
+
+The pipeline deploys this service, but only after `.github/workflows/rubai-stt.yml`
+has run the guard's tests **and** built the image, started it, and made it
+transcribe. That is a stronger gate than either deploy in `ci.yml` gets, and it
+is there because the two things that went wrong here before — a command line
+nobody could run locally, a binary tuned for the build machine's CPU — were
+both invisible to tests and obvious to a container that actually starts.
+
+It stays dormant until two things exist, and says which one is missing:
+
+| | |
+|---|---|
+| `RAILWAY_TOKEN` (secret) | the same Railway project token `ci.yml` uses |
+| `RAILWAY_SERVICE_STT` (variable) | this service's name or id in that project |
+
+The service itself has to be created in Railway by hand first — a project token
+can deploy services, not create them. **Empty service**, then Settings → Root
+Directory `services/rubai-stt`, and **no public domain**: the whole security
+argument on this page rests on the model being reachable only over Railway's
+private network.
+
+**There is no health wait in the deploy job**, which is deliberate and not an
+omission. A service with no public domain has no URL for CI to poll. Railway's
+own healthcheck does that job instead: `railway.json` points it at `/health`,
+which stays 503 until the model answers rather than until the port opens, so a
+container that cannot load its weights never takes traffic — and
+`restartPolicyType: ON_FAILURE` retries it three times before giving up.
+
+The first build on Railway fetches 514 MiB of weights and compiles
+whisper.cpp, so expect it to take a good deal longer than the two minutes it
+takes on a warm CI runner. That has not been measured on Railway.
+
+Once it is up, the API is pointed at it by `STT_SERVICE_URL` and restarted.
+`/api/health` then reports `stt.configured`, which says the API has a URL and a
+token — not that the speech service answered. The first spoken command is what
+proves that.
+
+---
+
 ## Security
 
 | | |

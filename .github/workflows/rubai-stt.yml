@@ -7,6 +7,24 @@
 #
 # Separate from CI so the agent's own pipeline is never held up by a ten-minute
 # model build.
+#
+# It also deploys the service, and only after both jobs above it are green --
+# the guard's tests and an image that was built, started and made to transcribe
+# for real. That is a stronger gate than either of the deploys in ci.yml gets.
+#
+# Dormant until the repository settings carry:
+#   Secrets   -> RAILWAY_TOKEN         the same project token ci.yml uses
+#   Variables -> RAILWAY_SERVICE_STT   the speech service's name or id
+# While RAILWAY_SERVICE_STT is unset the deploy skips and prints the names of
+# the services the token can reach, so the value can be copied rather than
+# guessed.
+#
+# There is no health wait here, and that is deliberate rather than missing.
+# The speech service is meant to have no public domain -- it is reached over
+# Railway's private network and nothing else -- so there is no URL for CI to
+# poll. Railway's own healthcheck is what gates the deployment instead:
+# railway.json points it at /health, which stays 503 until the model actually
+# answers, so a container that cannot load its model never takes traffic.
 
 name: Rubai STT service
 
@@ -147,3 +165,143 @@ jobs:
       - name: Stop
         if: always()
         run: docker rm -f rubai || true
+
+  deploy:
+    name: Deploy the speech service to Railway
+    # Both, not either: the tests say the guard is right and the measure job
+    # says the image starts and transcribes. Shipping a model container that
+    # was never started is how the last two deploys here went wrong.
+    needs: [guard, measure]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       github.ref_name == github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment: production
+    # Railway builds this image itself: half a gigabyte of weights to fetch and
+    # whisper.cpp to compile, on a machine this job does not control.
+    timeout-minutes: 45
+
+    # Its own group. A speech deploy and an API deploy are separate services and
+    # have no reason to block each other, but two speech deploys racing would
+    # decide between themselves which image ends up live.
+    concurrency:
+      group: deploy-stt
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        # `railway up` uploads the working directory, and this service is built
+        # from services/rubai-stt/Dockerfile with its railway.json beside it.
+        working-directory: services/rubai-stt
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the deploy is configured
+        id: guard
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE_STT: ${{ vars.RAILWAY_SERVICE_STT }}
+        run: |
+          if [ -z "${RAILWAY_TOKEN}" ]; then
+            echo "token=false" >> "$GITHUB_OUTPUT"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Speech deploy skipped::RAILWAY_TOKEN is not set."
+          elif [ -z "${RAILWAY_SERVICE_STT}" ]; then
+            echo "token=true" >> "$GITHUB_OUTPUT"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Speech deploy skipped::RAILWAY_SERVICE_STT is not set. Create the service in Railway and add its name as a repository variable."
+          else
+            echo "token=true" >> "$GITHUB_OUTPUT"
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The same helper the web deploy carries, for the same reason: "set a
+      # variable" is a dead end when you do not know what to set it to. Service
+      # names are not secret; the token is never printed.
+      - name: Name the services this token can deploy
+        if: steps.guard.outputs.token == 'true' && steps.guard.outputs.configured != 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          npm install -g @railway/cli@5 >/dev/null 2>&1 || true
+          railway status --json > /tmp/status.json 2>/dev/null || true
+          python3 - <<'PYEOF'
+          import json
+
+          def names(node, inside=False):
+              found = []
+              if isinstance(node, dict):
+                  for key, value in node.items():
+                      if key == "name" and inside and isinstance(value, str):
+                          found.append(value)
+                      found += names(value, inside or key == "services")
+              elif isinstance(node, list):
+                  for item in node:
+                      found += names(item, inside)
+              return found
+
+          try:
+              found = sorted(set(names(json.load(open("/tmp/status.json")))))
+          except Exception:
+              found = []
+
+          if found:
+              print("Services in this Railway project:")
+              for name in found:
+                  print(f"  {name}")
+              print()
+              print("If the speech service is not in that list, create it first:")
+          else:
+              print("Could not read the service list from Railway.")
+              print()
+              print("Create the speech service in the Railway dashboard:")
+          print("  New service -> Empty service, then Settings -> Root Directory")
+          print("  = services/rubai-stt, and do NOT give it a public domain.")
+          print()
+          print("Then set its name as the RAILWAY_SERVICE_STT repository")
+          print("variable (Settings -> Secrets and variables -> Actions ->")
+          print("Variables) and run this workflow again.")
+          PYEOF
+
+      - name: Install the Railway CLI
+        if: steps.guard.outputs.configured == 'true'
+        run: npm install -g @railway/cli@5
+
+      - name: Deploy
+        if: steps.guard.outputs.configured == 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --service "${{ vars.RAILWAY_SERVICE_STT }}" --ci
+
+      - name: What still has to be true on the other side
+        if: steps.guard.outputs.configured == 'true'
+        run: |
+          # Not a check -- this job cannot reach a service with no public
+          # domain. It is the list of things whose absence makes the container
+          # refuse to start or the API unable to use it, written where whoever
+          # reads a deploy log will see it.
+          cat <<'EOF'
+          Deployed. Railway's own healthcheck decides whether it goes live:
+          /health stays 503 until the model answers, so a container that cannot
+          load its weights never takes traffic.
+
+          On the speech service, these must be set or it will not start:
+            STT_SERVICE_TOKEN     without it the service refuses to boot
+            STT_LANGUAGE=uz
+            STT_MAX_SECONDS=60
+            STT_MAX_BYTES=10485760
+            RUBAI_CONCURRENCY=1
+            RUBAI_AUDIO_CTX=auto
+            RUBAI_VAD=off
+
+          On the API service:
+            STT_PROVIDER=rubai
+            STT_SERVICE_URL=http://<this service>.railway.internal:8080
+            STT_SERVICE_TOKEN    the same value as above
+            STT_TIMEOUT_SECONDS=150
+
+          Memory: 870 MiB idle and 1.05 GiB under load were measured on a
+          four-vCPU runner, so size this service above 1 GB.
+          EOF
