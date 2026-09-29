@@ -348,6 +348,33 @@ def test_the_converter_never_goes_through_a_shell(monkeypatch) -> None:
     assert "-nostdin" in argv
 
 
+def test_every_flag_is_passed_as_a_flag_and_every_option_with_a_value() -> None:
+    """whisper-server answers a flag given a value by printing its usage.
+
+    It then exits 0, which from the outside is a clean shutdown — the container
+    reported "the model server stopped" and nothing said why. One deploy to
+    find, so the shape of the command line is pinned here.
+    """
+    engine = service.WhisperServer(make_config(whisper_bin="/bin/whisper-server"))
+    argv = engine.argv()
+
+    assert argv[0] == "/bin/whisper-server"
+    for index, item in enumerate(argv[1:], start=1):
+        if item in service.WhisperServer.OPTIONS:
+            value = argv[index + 1] if index + 1 < len(argv) else None
+            assert value is not None and not value.startswith("--"), item
+        elif item in service.WhisperServer.FLAGS:
+            following = argv[index + 1] if index + 1 < len(argv) else None
+            assert following is None or following.startswith("--"), item
+        elif item.startswith("--"):
+            raise AssertionError(f"{item} is neither a declared option nor a flag")
+
+    # The language is stated rather than detected.
+    assert argv[argv.index("--language") + 1] == "uz"
+    # The model server is never reachable from outside the container.
+    assert argv[argv.index("--host") + 1] == "127.0.0.1"
+
+
 def test_duration_is_read_from_the_file_rather_than_a_second_process() -> None:
     workspace = Path(tempfile.mkdtemp(prefix="rubai-test-"))
     try:

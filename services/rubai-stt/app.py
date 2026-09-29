@@ -171,32 +171,42 @@ class WhisperServer:
         )
         self.ready = False
 
+    #: Options take a value; flags do not. whisper-server answers a flag given
+    #: a value by printing its usage and exiting 0 — which from the outside is
+    #: indistinguishable from a clean shutdown, and cost one deploy to find.
+    OPTIONS = frozenset(
+        {"--model", "--host", "--port", "--threads", "--language"}
+    )
+    FLAGS = frozenset({"--no-timestamps"})
+
+    def argv(self) -> list[str]:
+        cfg = self._config
+        return [
+            cfg.whisper_bin,
+            "--model",
+            cfg.model_path,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(cfg.whisper_port),
+            "--threads",
+            str(cfg.threads),
+            # Stated, not detected: Whisper's auto-detect mistakes Uzbek for
+            # Arabic-script languages often enough to matter.
+            "--language",
+            cfg.language,
+            "--no-timestamps",
+        ]
+
     def spawn(self) -> None:
         cfg = self._config
         if not Path(cfg.model_path).exists():
             raise RuntimeError(f"model file missing at {cfg.model_path}")
         logger.info("Starting whisper-server on 127.0.0.1:%d", cfg.whisper_port)
         self._process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-            [
-                cfg.whisper_bin,
-                "--model",
-                cfg.model_path,
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(cfg.whisper_port),
-                "--threads",
-                str(cfg.threads),
-                "--language",
-                cfg.language,
-                "--no-timestamps",
-                # Whisper's auto-detect mistakes Uzbek for Arabic-script
-                # languages often enough that the language is pinned, not
-                # detected. The model is monolingual in practice anyway.
-                "--print-progress",
-                "false",
-            ],
+            self.argv(),
         )
+
 
     async def wait_until_ready(self, timeout: float) -> None:
         """Poll until the model answers, not merely until the port is open."""
