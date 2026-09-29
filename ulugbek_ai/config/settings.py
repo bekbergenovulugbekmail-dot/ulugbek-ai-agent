@@ -123,9 +123,15 @@ class Settings(BaseSettings):
     #: declared duration is checked against. Bytes remain the enforced limit,
     #: because a header can say anything.
     stt_max_seconds: Annotated[float, Field(gt=0, le=600)] = 60.0
-    #: A first request after a restart waits for a 514 MiB model to load, so
-    #: this is longer than a cloud provider would need.
-    stt_timeout_seconds: Annotated[float, Field(gt=0)] = 60.0
+    #: Longer than a cloud provider would need, for two reasons: a first
+    #: request after a restart waits for a 514 MiB model to load, and the
+    #: speech service caps its own whole-request budget at 120 seconds. This
+    #: has to sit above that cap, or the API gives up while the model is still
+    #: working and the CPU is spent on a transcript nobody reads. It also has
+    #: to clear the slowest transcription measured -- 59,870 ms for a
+    #: 55-second recording on four shared vCPU, CI run 36566943407 -- by more
+    #: than the 130 milliseconds that 60 left it. See tests/test_voice_timeout.
+    stt_timeout_seconds: Annotated[float, Field(gt=0)] = 150.0
 
     #: ``browser`` means the console speaks through the browser's own
     #: ``SpeechSynthesis``: no key, no cost, no audio crossing the network. A

@@ -131,6 +131,13 @@ class RubaiSpeechToText(SpeechToText):
                 "The speech service refused this service's token. Check that "
                 "STT_SERVICE_TOKEN matches the value on the speech service."
             )
+        if response.status_code == 504:
+            # The service's own budget ran out around the model. Distinct from
+            # the 502 below because the advice differs: too slow is worth
+            # retrying with a shorter recording, broken is not.
+            return SpeechTimeoutError(
+                detail or "The speech service ran out of time transcribing this."
+            )
         if response.status_code == 503:
             return SpeechError(
                 detail

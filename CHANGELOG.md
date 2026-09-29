@@ -5,6 +5,26 @@ because a list of verbs is not worth reading later.
 
 ## Unreleased
 
+### The speech timeouts are now in an order that works
+
+`STT_TIMEOUT_SECONDS` and `STT_MAX_SECONDS` were both 60. A 55-second
+recording — shorter than the limit actually accepts — was measured end to end
+at 59,870 ms on four shared vCPU (run 36566943407), which left 130 milliseconds.
+Past that the API answers 504 while the speech service keeps a CPU busy
+finishing a transcript nobody is waiting for, and tells the operator to try
+again, which starts a second one.
+
+Three waits now nest: the API waits **150 s**, the speech service caps its
+whole answer at **120 s**, and the audio it accepts at all stays at **60 s**.
+The cap is enforced rather than defaulted, and the queue wait and the inference
+share one deadline, so two requests behind one slot cannot add up to twice the
+budget. A model that outruns the budget answers **504** instead of 502, and the
+API turns that into a timeout rather than a bad gateway — "too slow" and
+"broken" are different things to tell someone.
+
+None of the three is measured on Railway hardware; they are sized from a
+four-vCPU runner and deliberately loose.
+
 ### The encoder window now fits the recording
 
 `whisper-server` reads `audio_ctx` from the request form, not only from the

@@ -54,6 +54,14 @@ BYTES_PER_SECOND: Final[int] = SAMPLE_RATE * 2
 ENCODER_POSITIONS_PER_SECOND: Final[int] = 50
 ENCODER_POSITIONS_MAX: Final[int] = 1500
 
+#: The ceiling on everything one request may take here, queue wait included.
+#: The API in front waits STT_TIMEOUT_SECONDS=150 for an answer, so a budget
+#: above this is time the caller has already stopped waiting for -- it answers
+#: 504 and this service carries on spending a CPU on a transcript nobody will
+#: read. 120 leaves thirty seconds of slack for the network and the API's own
+#: work either side.
+MAX_REQUEST_BUDGET_SECONDS: Final[float] = 120.0
+
 
 def window_seconds(audio_ctx: int) -> float:
     """How much audio an encoder context of *audio_ctx* positions can hear."""
@@ -156,7 +164,12 @@ class Config:
             # memory for the length of an inference; two at once doubles it, and
             # the second request is not faster for having started earlier.
             concurrency=_int("RUBAI_CONCURRENCY", 1),
-            request_timeout=_float("RUBAI_REQUEST_TIMEOUT_SECONDS", 120.0),
+            # Clamped, not merely defaulted: a value above the ceiling is a
+            # promise this service cannot keep to the API in front of it.
+            request_timeout=min(
+                _float("RUBAI_REQUEST_TIMEOUT_SECONDS", MAX_REQUEST_BUDGET_SECONDS),
+                MAX_REQUEST_BUDGET_SECONDS,
+            ),
             startup_timeout=_float("RUBAI_STARTUP_TIMEOUT_SECONDS", 300.0),
             # "auto" sizes the window to each recording. A number pins every
             # request to it, which is only safe while STT_MAX_SECONDS fits
@@ -318,7 +331,9 @@ class WhisperServer:
                 await asyncio.sleep(2)
         raise RuntimeError("whisper-server did not become ready in time")
 
-    async def transcribe(self, wav: Path, *, audio_ctx: int = 0) -> str:
+    async def transcribe(
+        self, wav: Path, *, audio_ctx: int = 0, timeout: float | None = None
+    ) -> str:
         data = {
             "temperature": "0.0",
             "response_format": "json",
@@ -336,6 +351,9 @@ class WhisperServer:
                 "/inference",
                 files={"file": ("audio.wav", handle, "audio/wav")},
                 data=data,
+                # What is left of the request's budget, not a fresh one. Absent
+                # only for the warm-up call, which has no caller waiting.
+                **({} if timeout is None else {"timeout": timeout}),
             )
         response.raise_for_status()
         payload: Any = response.json()
@@ -508,8 +526,17 @@ def create_app(
                     },
                 )
 
+            # One deadline for the whole request. Waiting for a free slot and
+            # running the inference spend the same budget, because a queue wait
+            # that buys a fresh full budget afterwards means this service can
+            # answer in twice what it promised -- and the API in front has long
+            # since given up.
+            deadline = started + cfg.request_timeout
             try:
-                await asyncio.wait_for(gate.acquire(), timeout=cfg.request_timeout)
+                await asyncio.wait_for(
+                    gate.acquire(),
+                    timeout=max(0.0, deadline - time.monotonic()),
+                )
             except asyncio.TimeoutError:
                 return JSONResponse(
                     status_code=503,
@@ -525,7 +552,27 @@ def create_app(
                 else cfg.audio_ctx
             )
             try:
-                text = await engine.transcribe(wav, audio_ctx=window)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # The slot arrived after the budget was gone. Queueing is
+                    # what ran out, so this is "busy", not "the model is slow".
+                    return JSONResponse(
+                        status_code=503,
+                        content={"error": "The service is busy. Try again shortly."},
+                    )
+                text = await engine.transcribe(
+                    wav, audio_ctx=window, timeout=remaining
+                )
+            except httpx.TimeoutException:
+                # Distinct from a broken model on purpose: the API reads this
+                # status to decide whether to tell the operator to try again.
+                logger.warning(
+                    "Transcription exceeded the %.0fs budget", cfg.request_timeout
+                )
+                return JSONResponse(
+                    status_code=504,
+                    content={"error": "The model took too long to transcribe this."},
+                )
             except Exception:
                 # The type, never the detail: an HTTP client puts URLs and
                 # headers into both its message and its traceback.
@@ -535,6 +582,8 @@ def create_app(
                     content={"error": "The model failed to transcribe the audio."},
                 )
             finally:
+                # Always, including both returns above: a slot held by a request
+                # that is already over wedges every request behind it.
                 gate.release()
 
             return JSONResponse(

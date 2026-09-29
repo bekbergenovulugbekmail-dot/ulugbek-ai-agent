@@ -67,10 +67,14 @@ class FakeWhisper:
         self.delay = 0.0
         self.raises: Exception | None = None
         self.windows: list[int] = []
+        self.budgets: list[float | None] = []
 
-    async def transcribe(self, wav: Path, *, audio_ctx: int = 0) -> str:
+    async def transcribe(
+        self, wav: Path, *, audio_ctx: int = 0, timeout: float | None = None
+    ) -> str:
         self.calls += 1
         self.windows.append(audio_ctx)
+        self.budgets.append(timeout)
         self.concurrent += 1
         self.max_concurrent = max(self.max_concurrent, self.concurrent)
         try:
@@ -595,3 +599,137 @@ def test_duration_is_read_from_the_file_rather_than_a_second_process() -> None:
         assert service.wav_duration_seconds(wav) == pytest.approx(2.5, abs=0.01)
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# The timeout budget
+#
+# The API in front of this service waits STT_TIMEOUT_SECONDS for an answer. If
+# this service can take longer than that, the caller gets a 504 while the model
+# keeps spending CPU on a transcript nobody is waiting for any more. So the
+# whole answer -- queue wait and inference together -- is bounded here, below
+# what the API will wait.
+# --------------------------------------------------------------------------- #
+def test_the_internal_budget_is_capped_however_it_is_configured(monkeypatch) -> None:
+    monkeypatch.setenv("STT_SERVICE_TOKEN", TOKEN)
+
+    monkeypatch.delenv("RUBAI_REQUEST_TIMEOUT_SECONDS", raising=False)
+    assert service.Config.from_env().request_timeout == 120.0
+
+    monkeypatch.setenv("RUBAI_REQUEST_TIMEOUT_SECONDS", "999")
+    assert service.Config.from_env().request_timeout == 120.0
+
+    # Below the ceiling it is taken as written: the cap is a maximum, not a
+    # fixed value.
+    monkeypatch.setenv("RUBAI_REQUEST_TIMEOUT_SECONDS", "45")
+    assert service.Config.from_env().request_timeout == 45.0
+
+
+def test_the_queue_and_the_model_share_one_budget(engine: FakeWhisper, monkeypatch) -> None:
+    """Waiting in the queue spends the same budget the inference does.
+
+    Two requests, one slot: without a shared deadline the second one waits its
+    full budget for the slot and then gets a fresh full budget for the model,
+    so the service can answer in twice what it promised.
+    """
+    monkeypatch.setattr(
+        service, "convert_to_wav", lambda source, dest, **k: write_wav(dest, 1.0)
+    )
+    engine.delay = 0.2
+    app = service.create_app(  # type: ignore[arg-type]
+        make_config(concurrency=1, request_timeout=1.0), whisper=engine
+    )
+
+    with TestClient(app) as http:
+        import threading
+
+        def call() -> None:
+            post(http, b"audio")
+
+        threads = [threading.Thread(target=call) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    assert len(engine.budgets) == 2
+    # Handed a budget at all, before asking whether it was the right one.
+    assert all(budget is not None for budget in engine.budgets), (
+        "the route computed a remaining budget and did not pass it on"
+    )
+    # The one that queued behind the other cannot have been given the whole
+    # budget: it had already spent some of it waiting.
+    assert min(engine.budgets) < 1.0 - 0.15
+    # And nobody is given more than the budget.
+    assert max(engine.budgets) <= 1.0
+
+
+async def test_the_budget_is_actually_put_on_the_wire() -> None:
+    """A budget the route computed and did not send is not a budget.
+
+    The fake whisper in the tests above records the argument it was handed,
+    which says nothing about what reached httpx.
+    """
+    seen: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions.get("timeout"))
+        return httpx.Response(200, json={"text": "salom"})
+
+    wav = Path(tempfile.mkdtemp(prefix="rubai-test-")) / "a.wav"
+    write_wav(wav, 1.0)
+    try:
+        engine = service.WhisperServer(
+            make_config(request_timeout=90.0),
+            client=httpx.AsyncClient(
+                base_url="http://whisper",
+                timeout=90.0,
+                transport=httpx.MockTransport(handler),
+            ),
+        )
+        await engine.transcribe(wav, audio_ctx=256, timeout=7.5)
+        assert seen[0]["read"] == pytest.approx(7.5)
+
+        # Without one it falls back to the client's own timeout, which is the
+        # path the warm-up call takes.
+        seen.clear()
+        await engine.transcribe(wav, audio_ctx=256)
+        assert seen[0]["read"] == pytest.approx(90.0)
+    finally:
+        shutil.rmtree(wav.parent, ignore_errors=True)
+
+
+def test_a_model_that_runs_out_of_time_is_a_gateway_timeout(
+    client, engine: FakeWhisper
+) -> None:
+    """504, not 502.
+
+    The API in front reads the status to decide what to tell the operator, and
+    "the model took too long" and "the model broke" are different things to be
+    told.
+    """
+    engine.raises = httpx.ReadTimeout("timed out")
+
+    response = post(client, b"audio")
+
+    assert response.status_code == 504
+    assert "127.0.0.1" not in response.text
+    assert TOKEN not in response.text
+
+
+def test_a_timed_out_inference_leaves_nothing_behind(client, engine: FakeWhisper) -> None:
+    """No file on disk, and no slot held for a request that is already over.
+
+    A semaphore released only on the happy path wedges the service after the
+    first timeout: every later request queues behind a slot nobody holds.
+    """
+    before = set(Path(tempfile.gettempdir()).glob("rubai-*"))
+
+    engine.raises = httpx.ReadTimeout("timed out")
+    assert post(client, b"audio").status_code == 504
+
+    assert set(Path(tempfile.gettempdir()).glob("rubai-*")) == before
+
+    # The slot has to have come back, or this one never answers.
+    engine.raises = None
+    assert post(client, b"audio").status_code == 200

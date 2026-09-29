@@ -264,18 +264,38 @@ STT_SERVICE_TOKEN=<the same value as on the speech service>
 STT_LANGUAGE=uz-UZ
 STT_MAX_BYTES=10485760
 STT_MAX_SECONDS=60
-STT_TIMEOUT_SECONDS=60
+STT_TIMEOUT_SECONDS=150
 ```
 
-**`STT_TIMEOUT_SECONDS` and `STT_MAX_SECONDS` are both 60, and that is not a
-safe pair on a four-vCPU box.** A 55-second recording was measured at 59,870 ms
-end to end (run 36566943407) — 130 ms inside a 60-second client timeout — and
-`STT_MAX_SECONDS=60` accepts one longer still. The speech service keeps working
-for its own 120-second budget while the API has already given up, so the
-operator sees a 504 and the CPU is spent anyway. Either raise
-`STT_TIMEOUT_SECONDS` to about 150 so it sits above the service's own limit, or
-lower `STT_MAX_SECONDS` to what comfortably finishes on the container being
-deployed to. The pairing has not been measured on Railway hardware.
+### The three waits
+
+They only work in this order, each one longer than the one inside it:
+
+| | | |
+|---|---|---|
+| The API waits for an answer | `STT_TIMEOUT_SECONDS` | **150 s** |
+| The speech service's whole answer, queue wait included | `RUBAI_REQUEST_TIMEOUT_SECONDS`, capped | **120 s** |
+| The audio it will accept at all | `STT_MAX_SECONDS` | **60 s** |
+
+`STT_TIMEOUT_SECONDS` was 60, and that was the one real blocker this
+configuration had. A 55-second recording — shorter than the 60 s the service
+accepts — was measured end to end at **59,870 ms** on four shared vCPU (run
+36566943407). That is 130 milliseconds of headroom. Past it the API answers the
+operator 504 and the speech service carries on holding a CPU to finish a
+transcript nobody is waiting for, and the advice the operator gets is to try
+again, which starts a second one.
+
+The 120-second cap is enforced in the service rather than merely defaulted:
+`RUBAI_REQUEST_TIMEOUT_SECONDS` above it is clamped down. Queue wait and
+inference share **one** deadline, so two requests behind one slot cannot add up
+to twice the budget. When it runs out around the model the service answers
+**504**, which the API turns into a timeout rather than a bad gateway — "too
+slow" and "broken" are different things to tell someone, and only the first is
+worth retrying with a shorter recording.
+
+None of these three numbers has been measured on Railway hardware. They are
+sized from a four-vCPU runner, and 150 over 120 over 60 is deliberately loose
+so that a slower container does not need them changed.
 
 On the **speech** service:
 
@@ -286,6 +306,11 @@ STT_MAX_BYTES=10485760
 STT_MAX_SECONDS=60
 RUBAI_CONCURRENCY=1
 WHISPER_THREADS=<defaults to the container's CPU count>
+
+# The whole-request budget: queue wait and inference together. Values above
+# 120 are clamped to 120, because the API in front waits 150 and a promise
+# longer than that cannot be kept to it.
+RUBAI_REQUEST_TIMEOUT_SECONDS=120
 
 # The encoder window. `auto` (the default) sizes it to each recording, so a
 # short command is cheap and a long one is still heard to the end. A number
@@ -324,8 +349,12 @@ into the bundle — so there is no version of this where a token lives there.
 
 ## Testing
 
-- `services/rubai-stt/tests/` — 34 tests covering the guard, with no model and
+- `services/rubai-stt/tests/` — 39 tests covering the guard, with no model and
   no ffmpeg, so they run in a second on every push.
+- `tests/test_voice_timeout.py` — the three waits above, as a contract: that
+  they are ordered, that the slowest transcription measured fits inside them
+  with room, that each kind of running out of time becomes the right status,
+  and — kept rather than run once and deleted — what 60 seconds costs.
 - `tests/test_voice_rubai.py` — the API's adapter against every way the service
   can fail: absent, timing out, still loading, refusing the token, returning
   500, returning a body that is not what was promised.
