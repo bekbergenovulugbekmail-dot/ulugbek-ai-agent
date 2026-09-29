@@ -148,33 +148,58 @@ jobs:
           fi
 
       # Everything above tests the plumbing. This tests the thing the
-      # plumbing is for, and is the only step that reaches Anthropic — so
-      # it is opt-in: it creates a run and spends tokens.
-      - name: One real agent request, end to end
+      # plumbing is for, through the endpoint the console actually uses:
+      # POST /agent/runs returns immediately and the work happens in a
+      # background task on its own database session — a different path from
+      # the synchronous one, and one that can fail on its own.
+      #
+      # Opt-in: it creates a run and spends tokens.
+      - name: One real agent request, the way the console makes it
         if: inputs.agent_request
         run: |
-          echo "POST $API/agent/run  (Origin: $WEB)"
-          code=$(curl -sS --max-time 180 -o /tmp/run.json -w '%{http_code}' \
-                 -X POST "$API/agent/run" \
+          marker="deployment-check-$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "POST $API/agent/runs  (Origin: $WEB)"
+          code=$(curl -sS --max-time 60 -o /tmp/start.json -w '%{http_code}' \
+                 -X POST "$API/agent/runs" \
                  -H 'content-type: application/json' \
                  -H "Origin: $WEB" \
-                 -d '{"message":"Reply with the single word: pong."}' || echo 000)
+                 -d "{\"message\":\"Reply with the single word: pong. ($marker)\"}" \
+                 || echo 000)
           echo "  HTTP $code"
-          python3 -m json.tool < /tmp/run.json 2>/dev/null || cat /tmp/run.json
+          python3 -m json.tool < /tmp/start.json 2>/dev/null || cat /tmp/start.json
           echo
-          # The body is the application's own envelope, already redacted by
-          # it; no credential can reach this log through it.
-          status=$(python3 -c "import json;print(json.load(open('/tmp/run.json')).get('status',''))" 2>/dev/null || true)
-          if [ "$status" = "COMPLETED" ]; then
-            echo "VERDICT: the agent reached Anthropic and answered. End to end works."
-          elif [ "$code" = "200" ] || [ "$code" = "202" ]; then
-            echo "VERDICT: the run was created but did not complete (status ${status:-unknown})."
-            echo "         The error field above is the real reason."
-            echo "agent run did not complete" >> /tmp/failures
-          else
-            echo "VERDICT: the request never became a run (HTTP $code). The message"
-            echo "         above names the configuration that stopped it."
+
+          if [ "$code" != "202" ] && [ "$code" != "200" ]; then
+            echo "VERDICT: the console's endpoint refused the request (HTTP $code)."
+            echo "         The message above names what stopped it."
             echo "agent request rejected with HTTP $code" >> /tmp/failures
+            exit 0
+          fi
+
+          run_id=$(python3 -c "import json;print(json.load(open('/tmp/start.json'))['run_id'])")
+          echo "watching run $run_id"
+          status=""
+          for attempt in $(seq 1 40); do
+            curl -fsS --max-time 15 "$API/agent/runs/$run_id" -o /tmp/run.json || true
+            status=$(python3 -c "import json;print(json.load(open('/tmp/run.json')).get('status',''))" 2>/dev/null || true)
+            if [ -n "$status" ] && [ "$status" != "RUNNING" ]; then break; fi
+            sleep 3
+          done
+          python3 -c "import json;r=json.load(open('/tmp/run.json'));[print(f'  {k}: {r.get(k)}') for k in ('status','output','error','iterations','replans','tools_used')]"
+          echo
+
+          # One request must produce exactly one run. A console that started a
+          # second on the same click would double every bill and side effect.
+          curl -fsS --max-time 20 "$API/agent/runs?limit=20" -o /tmp/runs.json || true
+          matches=$(python3 -c "import json;print(sum(1 for r in json.load(open('/tmp/runs.json')) if '$marker' in (r.get('input') or '')))" 2>/dev/null || echo "?")
+          echo "runs carrying this request's marker: $matches"
+
+          if [ "$status" = "COMPLETED" ] && [ "$matches" = "1" ]; then
+            echo "VERDICT: the console's endpoint reached Anthropic, the agent answered,"
+            echo "         and the request produced exactly one run."
+          else
+            echo "VERDICT: status=$status, runs for this request=$matches (expected COMPLETED and 1)."
+            echo "console-path run: status=$status, runs=$matches" >> /tmp/failures
           fi
 
       # A check that stays green while production is down is worse than no
