@@ -1,0 +1,113 @@
+# What the browser actually sees.
+#
+# "Cannot reach the backend" in the console means `fetch` itself threw, which
+# narrows the cause to the transport: a wrong compiled-in API URL, or a CORS
+# response the browser refuses. Neither is visible from a terminal that cannot
+# reach the deployment, and neither shows up in either service's own logs — a
+# CORS block happens entirely in the browser, and the compiled URL is a string
+# inside a JavaScript chunk.
+#
+# So this runs the same three checks a browser would, from a runner that can
+# reach both services, and prints the evidence.
+
+name: Deployment check
+
+on:
+  workflow_dispatch:
+    inputs:
+      web_url:
+        description: "Web service base URL"
+        required: true
+        default: "https://frontend-production-b432.up.railway.app"
+      api_url:
+        description: "API base URL, including /api"
+        required: true
+        default: "https://ulugbek-ai-agent-production.up.railway.app/api"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Can the deployed frontend reach the deployed backend
+    runs-on: ubuntu-latest
+
+    env:
+      WEB: ${{ inputs.web_url }}
+      API: ${{ inputs.api_url }}
+
+    steps:
+      - name: The backend answers at all
+        run: |
+          echo "GET $API/health"
+          code=$(curl -sS --max-time 20 -o /tmp/health.json -w '%{http_code}' "$API/health" || echo 000)
+          echo "  HTTP $code"
+          cat /tmp/health.json 2>/dev/null || true
+          echo
+
+      - name: The web service answers at all
+        run: |
+          for path in /healthz /; do
+            code=$(curl -sS --max-time 20 -o /tmp/web.out -w '%{http_code}' "$WEB$path" || echo 000)
+            echo "GET $WEB$path -> HTTP $code"
+          done
+
+      # The decisive CORS check: the browser sends an Origin header and refuses
+      # the response unless it is allowed back. curl does not enforce that, so
+      # the headers are printed rather than trusted.
+      - name: What the backend tells a browser on this origin
+        run: |
+          echo "--- simple request, Origin: $WEB"
+          curl -sS --max-time 20 -D /tmp/h.txt -o /dev/null \
+               -H "Origin: $WEB" "$API/health" || true
+          grep -iE '^(HTTP/|access-control-|vary)' /tmp/h.txt || echo "  (no CORS headers at all)"
+          echo
+          echo "--- preflight, OPTIONS with Access-Control-Request-Method"
+          curl -sS --max-time 20 -D /tmp/p.txt -o /dev/null -X OPTIONS \
+               -H "Origin: $WEB" \
+               -H "Access-Control-Request-Method: GET" \
+               -H "Access-Control-Request-Headers: content-type" \
+               "$API/health" || true
+          grep -iE '^(HTTP/|access-control-|vary)' /tmp/p.txt || echo "  (no CORS headers at all)"
+          echo
+          allowed=$(grep -i '^access-control-allow-origin' /tmp/h.txt | tr -d '\r' | cut -d' ' -f2- || true)
+          if [ -z "$allowed" ]; then
+            echo "VERDICT: the backend sends no Access-Control-Allow-Origin. A browser on"
+            echo "         $WEB will block every request, which is exactly what"
+            echo "         'Cannot reach the backend' looks like."
+          elif [ "$allowed" = "*" ] || [ "$allowed" = "$WEB" ]; then
+            echo "VERDICT: CORS allows this origin ($allowed). Not the cause."
+          else
+            echo "VERDICT: the backend allows '$allowed', not '$WEB'."
+          fi
+
+      # NEXT_PUBLIC_* values are compiled into the JavaScript, so the deployed
+      # bundle is the only place the truth about them exists.
+      - name: Which API URL is compiled into the deployed frontend
+        run: |
+          curl -fsS --max-time 20 "$WEB/" -o /tmp/index.html
+          chunks=$(grep -o '/_next/static/chunks/[A-Za-z0-9._/-]*\.js' /tmp/index.html | sort -u)
+          echo "chunks referenced by the page:"
+          echo "$chunks" | sed 's/^/  /'
+          echo
+          : > /tmp/found.txt
+          for c in $chunks; do
+            curl -fsS --max-time 20 "$WEB$c" -o /tmp/chunk.js || continue
+            grep -oE 'https?://[A-Za-z0-9._-]+(:[0-9]+)?/api' /tmp/chunk.js >> /tmp/found.txt || true
+          done
+          echo "API base URLs found inside the deployed bundle:"
+          if [ -s /tmp/found.txt ]; then
+            sort -u /tmp/found.txt | sed 's/^/  /'
+          else
+            echo "  (none found)"
+          fi
+          echo
+          if grep -q "localhost:8000" /tmp/found.txt 2>/dev/null; then
+            echo "VERDICT: the deployed bundle calls localhost. NEXT_PUBLIC_API_BASE_URL"
+            echo "         was missing or wrong when this image was BUILT — changing it"
+            echo "         now does nothing until the image is rebuilt."
+          elif grep -qF "$API" /tmp/found.txt 2>/dev/null; then
+            echo "VERDICT: the bundle calls $API — the compiled URL is correct."
+          else
+            echo "VERDICT: the bundle does not contain the expected API URL."
+          fi
