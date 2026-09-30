@@ -1,93 +1,106 @@
 # Next
 
-Production works end to end and is closed to anonymous callers, verified
-against the deployed service on 2026-09-29 (`docs/PROJECT_STATE.md` holds the
-evidence). What follows is ordered by what would hurt most if it stayed as it
-is, not by what is most interesting to build.
+Three services are live on Railway and the speech service joined them on
+2026-09-29 (`docs/PROJECT_STATE.md` holds the evidence). Ordered by what would
+hurt most if it stayed as it is, not by what is most interesting to build.
 
-## 1. Watch production rather than visiting it
+## 1. Nobody has spoken to it yet
 
-The deployment check is manual. On a schedule it would notice the next silent
-outage — the backend was down for nine days before anyone looked — and the
-`/api/health` body already carries everything such a check needs.
+Two separate gaps, and the second is the one that could invalidate a month of
+work.
 
-## 2. Creating a project needs the API
+**Nothing has been transcribed in production.** `/api/health` reports
+`stt: {provider: "rubai", configured: true, usable: true}`, which means the API
+holds a provider, a URL and a token. It is not a probe. The two services have
+never exchanged a request, and the first spoken command is what proves they
+can. This costs one sentence into the microphone.
 
-There is no form. Every project is created with a POST, which makes the
-Projects page read-only in practice and the GitHub and Railway bindings
-awkward to set up.
+**No Uzbek has been measured anywhere.** The CI check transcribes English,
+which proves the pipeline and says nothing about accuracy. The model author
+reports ~17% WER on their own recordings; word error rate moves with the
+microphone, the room, the dialect, and this console's vocabulary is unusual —
+Uzbek sentences carrying `deploy`, `commit`, `Railway`, project names.
 
-## Decide what speech should cost
+`docs/RUBAI_STT_BENCHMARK.md` has the method and says plainly that it holds no
+results. `scripts/rubai_benchmark.py` is written and waiting. Record twenty
+commands the way you would actually speak them, write the manifest, run it.
 
-The Uzbek model works and is too slow to talk to. Measured on 4 vCPU: **~21
-seconds per transcription**, and the same 21 seconds whether the recording is
-five seconds or thirty, because Whisper's encoder always runs over a 30-second
-window. With the agent's own ~9 s that is half a minute per spoken command.
+**Until that number exists the provider choice is not settled**, and neither is
+any of the latency work: `SpeechToText` exists precisely so that switching is
+one adapter.
 
-This is the one decision nobody else can make, because each way out costs
-something different:
+## 2. The agent cannot see its own deployments
 
-**The window is done and needs no decision.** Sizing it per recording is the
-default, measured at roughly half the time for a spoken command with nothing
-lost at 11, 22, 33 or 55 seconds. What is left is money or accuracy:
+`RAILWAY_TOKEN` is not set on the API service, so every Railway tool fails.
+Two variables, because the kind is not guessed:
+
+```
+RAILWAY_TOKEN=<a project token>
+RAILWAY_TOKEN_KIND=project     # the default is `account`
+```
+
+Prefer a **project** token: it is scoped to one project and environment, where
+an account token reaches everything. Getting `RAILWAY_TOKEN_KIND` wrong is a
+confusing failure rather than an obvious one.
+
+## 3. Nothing watches production
+
+The deployment check runs when someone asks it to. No workflow in this
+repository is on a schedule — the backend was once down for nine days before
+anyone looked, and there are three services now instead of two. `/api/health`
+already carries everything such a check needs.
+
+The speech service is the awkward one: it has no public domain by design, so
+nothing outside Railway can reach it. Watching it means either a probe endpoint
+on the API that calls it over the private network, or reading Railway's own
+status.
+
+## 4. Confirm, once, in the dashboard
+
+The `frontend` Railway service needs an **empty Root Directory** for the CI
+deploy, which also means its **GitHub integration must stay off**. If it is
+still on, the next commit makes Railway build the *repository root* for it: the
+root `Dockerfile`, the backend image, on the console's domain.
+
+Nothing in this repository can see that setting, and the first symptom would be
+the console answering as the API.
+
+The speech service is the opposite case and is correct as it is: its Root
+Directory **is** `services/rubai-stt`, because the deploy job uploads the
+repository root and lets Railway select the subdirectory. Setting both ends is
+what made the first attempt fail.
+
+## 5. Creating a project still has no form
+
+`project_create` now exists as a tool, so the agent can register one when
+asked. The Projects page is still read-only, which is fine while the console is
+a conversation and worth revisiting if it stops being one.
+
+## Speech, if it turns out to be too slow
+
+Only worth opening after §1. The encoder window is done — sized per recording,
+measured at 9,296 ms for eleven seconds of speech on four shared vCPU (run
+36569415344), against ~21 s before. **Railway's own latency has not been
+measured.** What is left costs money or accuracy:
 
 | | Effect | Cost |
 |---|---|---|
 | More vCPU on that service | Scales to roughly 8 threads | Money, monthly, continuously |
 | A Whisper **small** fine-tune | ~3× faster, ~250 MiB | Worse on Uzbek, which is why it was fine-tuned |
-| VAD, with a tuned threshold | Fastest on silence by far; fixes the long-pause case | As shipped it **lost three sentences of five** at 55 s. Needs a threshold someone has measured |
+| VAD, with a tuned threshold | Fastest on silence; fixes the long-pause case | As shipped it **lost three sentences of five** at 55 s |
 | Back to a cloud API | Fast, nothing always-on | A per-minute bill, and the audio leaves the deployment |
 
-A spoken command now takes about 9.3 s to transcribe on four shared vCPU, plus
-the agent's own ~9 s. Whether that is good enough to talk to is the question;
-if it is not, the first row is the honest fix and the rest are trades.
+## Known and unfixed
 
-## Deploy the speech service
-
-The image builds, runs and transcribes in CI; nothing of it is on Railway yet.
-
-1. Railway → **New service** → this repository → root directory
-   `services/rubai-stt`. Leave it **without a public domain**: the API reaches
-   it privately and the model should not be on the internet.
-2. On it: `STT_SERVICE_TOKEN` (generate with
-   `python -c "import secrets; print(secrets.token_urlsafe(32))"`). It refuses
-   to start without one.
-3. On the **API** service: `STT_PROVIDER=rubai`,
-   `STT_SERVICE_URL=http://rubai-stt.railway.internal:8080`, and the same
-   `STT_SERVICE_TOKEN`.
-4. Then add `RAILWAY_SERVICE_WEB`'s equivalent for this service if you want CI
-   to deploy it, the same way the console is deployed.
-
-`/api/health` will then report `stt: {provider: "rubai", configured: true,
-usable: true}` and the microphone appears in the console.
-
-## Measure it on your own voice
-
-Nobody has transcribed real Uzbek through this yet — the CI check transcribes
-English, which proves the pipeline and nothing about accuracy. The model
-author reports ~17% WER on their test set; that is a fact about their
-recordings.
-
-`docs/RUBAI_STT_BENCHMARK.md` has the method and says plainly that it holds no
-results. Record twenty commands the way you would actually speak them, write
-the manifest, and run `scripts/rubai_benchmark.py`. Until that is done, the
-provider choice is not settled — `SpeechToText` exists so switching is one
-adapter.
-
-## Confirm, once
-
-The `frontend` Railway service now has an **empty Root Directory** — that is
-what the CI deploy needs, and clearing it is what made the first successful web
-deploy possible. It also means that service's **GitHub integration must stay
-off**. If it is still on, the next commit makes Railway build the *repository
-root* for it: the root `railway.json`, the root `Dockerfile`, the backend
-image, on the console's domain.
-
-Check it once in the Railway dashboard. Nothing in this repository can see that
-setting, and the first symptom would be the console answering as the API.
+A pause of about **fifteen seconds** mid-recording loses everything after it —
+whisper's own segment handling, present before this work and unchanged by it.
+VAD fixes that one case and loses more elsewhere. Silence transcribes as the
+word `musiqa`.
 
 ## Smaller
 
+- Railway warns that `railway.json` (Config as Code) is deprecated and that
+  existing files keep working **until 2026-12-01**. Three services use one.
 - SSE is a database cursor polled at ~0.75s; a real push would cut the latency
   and the query load together.
 - `frontend/` is absent from `docker-compose.yml`, so the local stack is the
