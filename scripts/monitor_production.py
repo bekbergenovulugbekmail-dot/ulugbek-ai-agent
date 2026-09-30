@@ -541,10 +541,35 @@ async def check_live_stream(
         )
         return Checkpoint("live stream", Outcome.FAILED, detail, elapsed())
     if status != "COMPLETED":
+        # "The run failed" is a fact nobody can act on. The row carries the
+        # error that stopped it, and asking costs one request on a path that
+        # has already gone wrong.
+        reason = await _run_error(target, client, run_id)
+        detail = f"the run settled as {status}"
         return Checkpoint(
-            "live stream", Outcome.FAILED, f"the run settled as {status}", elapsed()
+            "live stream", Outcome.FAILED, f"{detail}: {reason}" if reason else detail,
+            elapsed(),
         )
     return Checkpoint("live stream", Outcome.OK, "run COMPLETED", elapsed())
+
+
+async def _run_error(
+    target: Target, client: httpx.AsyncClient, run_id: str
+) -> str | None:
+    """Why the run stopped, if production will say. Never raises."""
+    try:
+        response = await client.get(
+            f"{target.api_url}/agent/runs/{run_id}",
+            headers=target.auth_header,
+            timeout=30.0,
+        )
+        if response.status_code != 200:
+            return None
+        body = response.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    error = body.get("error")
+    return str(error) if error else None
 
 
 # --------------------------------------------------------------------------- #

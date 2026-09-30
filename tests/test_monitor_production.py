@@ -327,6 +327,64 @@ async def test_a_run_that_fails_is_reported_as_a_failure() -> None:
     assert "FAILED" in result.detail
 
 
+async def test_a_failed_run_is_asked_why_rather_than_just_reported() -> None:
+    """"The run failed" is a fact nobody can act on.
+
+    The run row carries the error that stopped it, and a monitor that names the
+    checkpoint but not the reason still leaves someone opening a dashboard at
+    six in the morning to find out what it already knew.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/stream"):
+            return sse(done_frame("FAILED"))
+        assert request.url.path.endswith(f"/agent/runs/{RUN_ID}")
+        return httpx.Response(
+            200,
+            json={
+                "id": RUN_ID,
+                "status": "FAILED",
+                "error": "Reached the maximum of 2 iterations without an answer.",
+            },
+        )
+
+    async with client_for(handler) as http:
+        result = await check_live_stream(TARGET, http, RUN_ID)
+
+    assert result.outcome is Outcome.FAILED
+    assert "maximum of 2 iterations" in result.detail
+
+
+async def test_a_run_whose_error_cannot_be_read_still_fails_cleanly() -> None:
+    """The reason is a bonus. Not getting it must not turn a failure into a crash."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/stream"):
+            return sse(done_frame("FAILED"))
+        return httpx.Response(500)
+
+    async with client_for(handler) as http:
+        result = await check_live_stream(TARGET, http, RUN_ID)
+
+    assert result.outcome is Outcome.FAILED
+    assert "FAILED" in result.detail
+
+
+async def test_a_completed_run_is_not_interrogated() -> None:
+    """Nothing extra is asked of production when the answer is already good."""
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return sse(done_frame("COMPLETED"))
+
+    async with client_for(handler) as http:
+        result = await check_live_stream(TARGET, http, RUN_ID)
+
+    assert result.outcome is Outcome.OK
+    assert len(paths) == 1
+
+
 async def test_a_stream_that_never_settles_is_a_failure() -> None:
     """No `done` frame at all: the run is wedged, or the stream is broken."""
     async with client_for(lambda request: sse(": heartbeat\n\n")) as http:
