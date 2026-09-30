@@ -4,16 +4,30 @@ Three services are live on Railway and the speech service joined them on
 2026-09-29 (`docs/PROJECT_STATE.md` holds the evidence). Ordered by what would
 hurt most if it stayed as it is, not by what is most interesting to build.
 
+## 0. The agent cannot think
+
+**`ANTHROPIC_API_KEY` in production is invalid.** Every agent run fails with
+`Claude API error (HTTP 401): 'API key is invalid.'` — found by the production
+monitor's first run (36661176347, 2026-09-30 02:44 UTC), a day after a real
+request completed normally.
+
+Rotate it in the Railway dashboard on the `ulugbek-ai-agent` service. Nothing
+in this repository can do it, and nothing else on this list matters while the
+agent cannot answer.
+
+`/health` will not tell you when this is fixed: `llm.configured` means a key is
+present, not that it works. The monitor will, because it sends a real request.
+
 ## 1. Nobody has spoken to it yet
 
 Two separate gaps, and the second is the one that could invalidate a month of
 work.
 
-**Nothing has been transcribed in production.** `/api/health` reports
-`stt: {provider: "rubai", configured: true, usable: true}`, which means the API
-holds a provider, a URL and a token. It is not a probe. The two services have
-never exchanged a request, and the first spoken command is what proves they
-can. This costs one sentence into the microphone.
+**~~Nothing has been transcribed in production.~~** Done, by the monitor: a
+third of a second of silence made the round trip through the private network in
+13,113 ms (run 36661176347). The two services can speak. What has still not
+happened is a *spoken* command through the console — one sentence into the
+microphone.
 
 **No Uzbek has been measured anywhere.** The CI check transcribes English,
 which proves the pipeline and says nothing about accuracy. The model author

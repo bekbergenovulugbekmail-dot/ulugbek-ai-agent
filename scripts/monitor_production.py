@@ -442,7 +442,11 @@ async def check_agent_background_run(
     response, problem, used = await _attempt(
         lambda: client.post(
             f"{target.api_url}/agent/runs",
-            json={"message": SMOKE_MESSAGE, "max_iterations": 2},
+            # Capped, because this runs unattended every day and a runaway
+            # would spend tokens all by itself. Not capped at 2: the agent
+            # plans before it answers, and a bound that tight would report a
+            # healthy production as broken the first time it replanned.
+            json={"message": SMOKE_MESSAGE, "max_iterations": 4},
             headers=target.auth_header,
             timeout=60.0,
         ),

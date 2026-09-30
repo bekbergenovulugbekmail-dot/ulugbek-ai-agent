@@ -338,6 +338,39 @@ registered on construction and scrubbed from the whole report, so a check added
 later cannot leak one by echoing a URL or a header. That is a test, not a
 convention.
 
+### What it found on its first run
+
+Run 36661176347, 2026-09-30 02:44 UTC. Seven checkpoints passed and one failed:
+
+```
+  PASS  api health                    137ms  version 0.1.0 in production
+  PASS  console health                 61ms  answers
+  PASS  auth refuses anonymous         46ms  401 without a token
+  PASS  auth accepts the operator      73ms  200
+  PASS  speech configuration            0ms  provider 'rubai' usable
+  PASS  speech service answers      13113ms  round trip through the private network
+  PASS  agent run starts               44ms  status RUNNING
+  FAIL  live stream                            the run settled as FAILED:
+        Claude API error (HTTP 401): authentication_error, 'API key is invalid.'
+```
+
+Two things happened here worth recording separately.
+
+**The first real transcription in production**, at 13,113 ms for a third of a
+second of silence. Until this run the two services had never exchanged a
+request; `stt.usable` said only that the API held a URL and a token. They can
+speak.
+
+**`ANTHROPIC_API_KEY` is invalid**, and the agent therefore cannot think. A
+real request completed on 2026-09-29 with `token_usage: 3954 in / 4 out`, so
+this broke in between — the monitor caught a regression inside a day, which is
+the entire reason it exists.
+
+**`/health` could not have caught it.** It reports `llm.configured: true`,
+which means a key is present, not that the key works — the same shape of claim
+as `stt.usable`. Only a real request finds an invalid credential, which is why
+the monitor sends one.
+
 ### What this does not check
 
 **Whether production is running the newest commit.** `/health` reports
