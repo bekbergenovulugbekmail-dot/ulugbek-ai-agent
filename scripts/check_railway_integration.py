@@ -29,11 +29,18 @@ import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
 from typing import Any, Final
 
 import httpx
 
-from scripts.monitor_production import (  # noqa: F401 - Outcome is re-exported
+# Run as a script, `scripts/` is on sys.path and the repository root is not, so
+# the import below fails -- which is how the first real run died, before it
+# reached a single check. Under pytest the root is already there and the bug was
+# invisible. A test now runs both scripts the way CI does.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts.monitor_production import (  # noqa: E402,F401 - see the path fix above
     Checkpoint,
     Outcome,
     Report,

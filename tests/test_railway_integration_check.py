@@ -246,3 +246,31 @@ def test_the_verdicts_never_contain_the_token() -> None:
     rendered = Report(verdicts(executions)).render()
 
     assert TOKEN not in rendered
+
+
+# --------------------------------------------------------------------------- #
+# Run the way CI runs it
+# --------------------------------------------------------------------------- #
+def test_the_scripts_start_when_run_as_scripts() -> None:
+    """Importing a module is not running a program.
+
+    Every test above imports `scripts.check_railway_integration`, which works
+    because pytest puts the repository root on sys.path. CI runs
+    `python scripts/check_railway_integration.py`, which puts `scripts/` there
+    instead -- and the first real run died on `No module named 'scripts'`
+    before it reached a single check.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    for script in ("monitor_production.py", "check_railway_integration.py"):
+        result = subprocess.run(
+            [sys.executable, str(root / "scripts" / script), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, f"{script}: {result.stderr}"
+        assert "--api" in result.stdout, script
