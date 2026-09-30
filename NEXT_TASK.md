@@ -43,17 +43,18 @@ Prefer a **project** token: it is scoped to one project and environment, where
 an account token reaches everything. Getting `RAILWAY_TOKEN_KIND` wrong is a
 confusing failure rather than an obvious one.
 
-## 3. Nothing watches production
+## 3. Watching production, one gap left
 
-The deployment check runs when someone asks it to. No workflow in this
-repository is on a schedule — the backend was once down for nine days before
-anyone looked, and there are three services now instead of two. `/api/health`
-already carries everything such a check needs.
+`.github/workflows/production-monitor.yml` now runs daily and stays quiet
+unless something is wrong (`docs/PROJECT_STATE.md` → *Monitoring*). Eight
+checkpoints, including a real transcription through the private network, which
+is the only liveness signal the speech service can give.
 
-The speech service is the awkward one: it has no public domain by design, so
-nothing outside Railway can reach it. Watching it means either a probe endpoint
-on the API that calls it over the private network, or reading Railway's own
-status.
+What it still cannot tell you is **whether production is running the newest
+commit**. `/health` reports `version: 0.1.0` — a constant — so a deploy that
+silently failed to roll out looks exactly like one that worked. Closing that
+means putting the build's commit SHA into the image and reporting it from
+`/health`, which touches the Dockerfile and CI.
 
 ## 4. Confirm, once, in the dashboard
 

@@ -280,6 +280,74 @@ way a browser does — the API URL compiled into the deployed bundle, the CORS
 headers the backend returns to the console's origin, and optionally one real
 agent request.
 
+## Monitoring
+
+`.github/workflows/production-monitor.yml`, daily at 06:47 UTC, plus
+**Actions → Production monitor → Run workflow** on demand.
+
+**It says nothing when everything passes.** A green mail every morning is a
+green mail nobody reads, and the first red one would be read as one more of
+them. The notification is the failed run: GitHub mails the repository owner
+when a scheduled workflow fails, and only then. No extra secret, no webhook.
+
+Eight checkpoints, each named in the log so a failure says which one:
+
+| Checkpoint | What would have to be true to pass |
+|---|---|
+| api health | 200, `status: ok`, database connected, LLM configured, `AUTH_TOKEN` usable |
+| console health | `/healthz` answers 200 |
+| auth refuses anonymous | `/system/overview` without a credential is 401 |
+| auth accepts the operator | the same endpoint with the token is 200 |
+| speech configuration | `/health` reports `stt.usable` |
+| speech service answers | a third of a second of silence transcribes through the API |
+| agent run starts | `POST /agent/runs` returns 202 with a run id |
+| live stream | SSE on that run reaches a `done` frame with `COMPLETED` |
+
+**HTTP 200 is not health**, which is why each check reads the body. The API
+answers 200 with its database unreachable, and `stt.usable` is a statement
+about configuration that stays true with the speech service switched off.
+
+**The speech service is the awkward one.** It has no public domain, so nothing
+outside Railway can reach it — and that is the point, since it holds a model
+anyone could spend CPU on. The API can reach it over the private network, so
+the probe goes through `POST /api/voice/transcribe`: a real transcription is
+the only evidence that the two services can still speak to each other.
+
+**Against false positives.** Railway answers 502 for a few seconds while it
+replaces a container, and a monitor that pages on that gets muted. Every
+network check is retried before it is believed, and the detail says when
+something passed on the second attempt. `auth refuses anonymous` is
+deliberately *not* retried: an API that answered a caller with no credential
+has answered, and a second opinion does not make it less true.
+
+**What it costs per run**: one agent request (the word `pong`, roughly 4k
+tokens) and one transcription of silence. Both leave the rows any request
+leaves and change no data. `--no-agent-run` and `--no-speech-probe` turn each
+off for a manual run.
+
+The logic is in `scripts/monitor_production.py`, not in the workflow, because
+bash inside YAML cannot be tested. `tests/test_monitor_production.py` drives
+every check through a transport double — 34 tests covering the retry, the
+redaction, and each way a service can be broken. Four negative controls were
+run against it: removing the retry, trusting HTTP 200 as health, dropping the
+redaction, and letting the anonymous probe carry the token. Each was caught by
+exactly the test written for it.
+
+**Secrets never reach the log.** Every secret the process is given is
+registered on construction and scrubbed from the whole report, so a check added
+later cannot leak one by echoing a URL or a header. That is a test, not a
+convention.
+
+### What this does not check
+
+**Whether production is running the newest commit.** `/health` reports
+`version: 0.1.0`, a constant in the source, so there is nothing to compare a
+deployment against. Checking it would mean putting the build's commit into the
+image and reporting it from `/health`; until that exists, a deploy that
+silently failed to roll out looks exactly like one that worked.
+
+---
+
 ## Configuration that matters
 
 Two variables cause most outages here, and both fail in ways that do not look

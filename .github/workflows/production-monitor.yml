@@ -1,0 +1,101 @@
+# Is production still working?
+#
+# The backend was once down for nine days before anyone looked. There are three
+# services now, and the speech service has no public domain at all, so "is it
+# up" is not a question a browser can ask from outside Railway.
+#
+# This runs daily and says nothing when everything passes. A green mail every
+# morning is a green mail nobody reads, and the first red one would be read as
+# one more of them. The notification is the failed run: GitHub mails the
+# repository owner when a scheduled workflow fails, and only then.
+#
+# The logic lives in scripts/monitor_production.py rather than in this file,
+# because bash inside YAML cannot be tested and this has to be right about two
+# things that pull against each other -- noticing a real outage, and not paging
+# on the 502 Railway returns while it swaps a container. tests/
+# test_monitor_production.py drives every check through a transport double,
+# including the retry, the redaction and each way a service can be broken.
+#
+# What it costs per run: one agent request (the word "pong", about 4k tokens)
+# and one transcription of a third of a second of silence. Both leave the rows
+# any request leaves and change no data.
+
+name: Production monitor
+
+on:
+  schedule:
+    # 06:47 UTC daily. Not on the hour: scheduled runs bunch up at :00 and get
+    # delayed, which turns a monitor's timestamps into noise.
+    - cron: "47 6 * * *"
+  workflow_dispatch:
+    inputs:
+      agent_run:
+        description: "Send one real agent request (spends tokens)"
+        type: boolean
+        required: false
+        default: true
+      speech_probe:
+        description: "Transcribe a moment of silence through the speech service"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+# One at a time. Two monitors overlapping would each start their own agent run.
+concurrency:
+  group: production-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    name: The deployed services still work
+    runs-on: ubuntu-latest
+    # The agent request and the speech probe are each allowed minutes, and a
+    # cold speech container loads a 514 MiB model before it answers.
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install httpx
+
+      - name: Check the credential is available
+        env:
+          AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
+        run: |
+          # Said here rather than discovered halfway through: without it the
+          # monitor can only check that the doors are locked, never that the
+          # key works, and it would report that as a failure every morning.
+          if [ -z "${AUTH_TOKEN}" ]; then
+            echo "::error title=No credential::AUTH_TOKEN is not set in this repository, so the monitor cannot check anything behind the door. Add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          echo "AUTH_TOKEN is present."
+
+      - name: Watch production
+        env:
+          AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
+          API: https://ulugbek-ai-agent-production.up.railway.app/api
+          WEB: https://frontend-production-b432.up.railway.app
+        run: |
+          flags=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            [ "${{ inputs.agent_run }}" = "true" ] || flags="$flags --no-agent-run"
+            [ "${{ inputs.speech_probe }}" = "true" ] || flags="$flags --no-speech-probe"
+          fi
+          python scripts/monitor_production.py --api "$API" --web "$WEB" $flags
+
+      - name: Say which checkpoint failed
+        if: failure()
+        run: |
+          # The step above already printed the named checkpoint and why. This
+          # turns it into the annotation that appears on the run itself, so the
+          # failure mail carries something more useful than "a job failed".
+          echo "::error title=Production monitor failed::A checkpoint above did not pass. The step log names it and says what it saw. Nothing was changed in production by this run."

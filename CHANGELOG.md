@@ -5,6 +5,37 @@ because a list of verbs is not worth reading later.
 
 ## Unreleased
 
+### Production is watched rather than visited
+
+The backend was once down for nine days before anyone looked, and there are
+three services now — one of which, the speech service, has no public domain and
+so cannot be asked from outside Railway at all.
+
+A daily workflow runs eight named checkpoints and **says nothing when they
+pass**. The notification is the failed run itself: a green mail every morning
+is a green mail nobody reads, and the first red one would be read as one more
+of them.
+
+Two things it gets right that a naive check would not. **HTTP 200 is not
+health** — the API answers 200 with its database unreachable, and `stt.usable`
+is a statement about configuration that stays true with the speech service
+switched off, so each check reads the body. And **Railway answers 502 while it
+replaces a container**, so every network check is retried before it is
+believed; a monitor that pages on a cold start gets muted, and a muted monitor
+is worse than none. The one check that is deliberately not retried is
+`auth refuses anonymous`: an API that answered a caller with no credential has
+answered.
+
+The speech service is probed through `POST /api/voice/transcribe`, because the
+API can reach it over the private network and nothing else can. A real
+transcription is the only evidence the two services can still speak.
+
+The logic is a tested Python script rather than bash inside YAML: 34 tests
+through a transport double, and four negative controls — removing the retry,
+trusting 200 as health, dropping the redaction, letting the anonymous probe
+carry the token — each caught by exactly the test written for it.
+
+
 ### The speech timeouts are now in an order that works
 
 `STT_TIMEOUT_SECONDS` and `STT_MAX_SECONDS` were both 60. A 55-second
