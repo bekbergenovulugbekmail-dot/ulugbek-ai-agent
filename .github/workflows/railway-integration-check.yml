@@ -1,0 +1,61 @@
+# Does the deployed backend's Railway token work? Read-only, manual only.
+#
+# Nothing outside the API can answer this. /health carries no integrations
+# block, and the Railway tools are registered whether or not a token is set --
+# deliberately, so that a missing one produces a clear message at call time
+# rather than a silently absent capability. Their presence in /api/tools
+# therefore proves nothing about the credential.
+#
+# So this makes the deployed agent use the token and then reads the recorded
+# tool executions, scoped to that one run. The verdict comes from
+# ToolExecution rows, not from the prose the agent wrote: a model describing a
+# failure fluently is not evidence that anything worked.
+#
+# Read-only. The request asks for facts and says not to change anything, and
+# railway_deploy is CRITICAL, which the permission system always gates behind a
+# human approval -- so a deploy cannot happen even if the model asked for one.
+# That this held is checked afterwards rather than assumed, and a gated tool
+# having executed is a hard failure.
+#
+# Manual only: it spends tokens, and it answers a question that is asked when
+# the Railway configuration changes rather than every day.
+
+name: Railway integration check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-integration-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: The Railway token works, read-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install httpx
+
+      - name: Ask the deployed agent, and read what it actually did
+        env:
+          AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
+          API: https://ulugbek-ai-agent-production.up.railway.app/api
+          WEB: https://frontend-production-b432.up.railway.app
+        run: python scripts/check_railway_integration.py --api "$API" --web "$WEB"
+
+      - name: Say which verdict failed
+        if: failure()
+        run: |
+          echo "::error title=Railway integration check failed::A verdict above did not pass. The step log names it. Nothing was deployed, restarted or changed by this run."

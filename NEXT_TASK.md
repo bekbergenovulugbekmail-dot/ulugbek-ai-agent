@@ -43,19 +43,21 @@ commands the way you would actually speak them, write the manifest, run it.
 any of the latency work: `SpeechToText` exists precisely so that switching is
 one adapter.
 
-## 2. The agent cannot see its own deployments
+## 2. The Railway token is set but unverified
 
-`RAILWAY_TOKEN` is not set on the API service, so every Railway tool fails.
-Two variables, because the kind is not guessed:
+`RAILWAY_TOKEN` and `RAILWAY_TOKEN_KIND=project` were added to the API service
+on 2026-09-30. Whether the token actually works has **not** been established,
+and cannot be until §0 is fixed: the only way to exercise it is to make the
+deployed agent call a Railway tool, and the agent cannot think.
 
-```
-RAILWAY_TOKEN=<a project token>
-RAILWAY_TOKEN_KIND=project     # the default is `account`
-```
+`.github/workflows/railway-integration-check.yml` is ready and answers it in
+one click — read-only, manual, verdicts taken from the recorded tool
+executions rather than from what the agent wrote. Run it once the Anthropic key
+is rotated.
 
-Prefer a **project** token: it is scoped to one project and environment, where
-an account token reaches everything. Getting `RAILWAY_TOKEN_KIND` wrong is a
-confusing failure rather than an obvious one.
+Nothing outside the API can answer this otherwise: `/health` has no
+integrations block, and the Railway tools register whether or not a token is
+configured, so seeing them in `/api/tools` proves nothing.
 
 ## 3. Watching production, one gap left
 
